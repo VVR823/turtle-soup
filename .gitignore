@@ -1,0 +1,117 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# python venv
+/.venv/
+/backend/.venv/
+venv/
+.venv/
+
+# python 字节码与缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# testing
+/coverage
+
+# next.js 构建产物
+/.next/
+/out/
+/dist/
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+!.env.example
+!backend/.env.example
+
+# IDE
+/.idea/
+*.iml
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# runtime trace logs (含玩家提问文本，不入库)
+/backend/data/traces/
+
+# 运行时数据与真实玩家反馈（含会话库、反馈文本，不入库）
+/backend/data/sessions.db
+/backend/data/sessions.json.bak
+/backend/data/feedback.jsonl
+/backend/data/soup_sources.json
+/backend/data/verified_qa_pairs.jsonl
+# 该文件的日期备份同样含真实玩家问答原文，不入库
+/backend/data/verified_qa_pairs.jsonl.bak_*
+/backend/data/generated_soups.json
+/data/
+
+# 部署压缩包（体积大、可再生，不入库）
+*.tar.gz
+*.tgz
+
+# 历史备份 / 冲突报告 / 一次性修复文档（不是源码）
+# soups.py 每次改动都会留一份带日期的备份（项目约定），用通配符统一忽略
+/backend/app/_deploy_check.py
+/backend/app/soups_backup_*.py
+/backend/app/soups.py.chu_bak
+/backend/app/soups.py.cpbak
+/backend/conflict_report.json
+/backend/CONFLICT_REPORT.md
+/backend/FIX_RESULTS.md
+/backend/NEW_SOUPS_QA_REPORT.md
+
+# 根目录一次性调试脚本（正式测试在 backend/tests/）
+/test_ctrl.py
+/test_final.py
+/test_v2.py
+
+# 后端一次性 QA 校验脚本（与 backend/tests/ 正式用例重复，不入库）
+/backend/test_qa_emeng_chongxian.py
+/backend/test_qa_seven_sins.py
+/backend/test_qa_yinguo.py
+/backend/test_qa_zhangsan_lisi.py
+
+# Next.js 脚手架默认图标（未使用的占位资源）
+/public/next.svg
+/public/vercel.svg
+/public/file.svg
+/public/window.svg
+/public/globe.svg
+
+# 个人复习文档（非项目源码）
+/讲解复习手册.md
+
+# 项目体检/审计报告（含未修复项清单，属个人工作稿，不入库）
+/项目体检报告_*.md
+
+# eval 评测产物（评测报告/日志不入库；qa_pairs/ 手写评测源文件需要入库，故用取反）
+# qa_pairs_auto/ 为脚本自动生成的「扩充问答」（质量不足以当正式评测集），一并忽略
+/backend/data/eval/*
+!/backend/data/eval/qa_pairs/
+!/backend/data/eval/qa_pairs/*
+/backend/data/eval/qa_pairs_auto/

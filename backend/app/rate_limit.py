@@ -1,0 +1,72 @@
+"""轻量滑动窗口限流（零依赖，内存实现）。
+
+背景：/api/chat 每次提问都会调 LLM，虽然访问口令拦着普通游客，
+但口令写在网页前端里，懂技术的人拿到后可以写脚本高频刷接口白嫖额度。
+限流按客户端真实 IP（X-Forwarded-For 最左项，nginx 已配置透传）限制
+单位时间内的请求次数，超限返回 429。
+
+实现：每个 key 维护一个时间戳队列（deque），滑动窗口内计数；
+线程锁保证多请求并发下计数不丢失。阈值在 main.py 里按接口配置。
+"""
+import threading
+import time
+from collections import defaultdict, deque
+
+from fastapi import HTTPException, Request
+
+from . import config
+
+
+class SlidingWindowLimiter:
+    """滑动窗口计数器：allow(key) 返回是否放行。"""
+
+    def __init__(self) -> None:
+        self._hits: dict[str, deque] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def allow(self, key: str, limit: int, window: float) -> bool:
+        now = time.time()
+        with self._lock:
+            dq = self._hits[key]
+            # 弹出窗口外的过期时间戳
+            while dq and dq[0] <= now - window:
+                dq.popleft()
+            if len(dq) >= limit:
+                return False
+            dq.append(now)
+            return True
+
+
+_limiter = SlidingWindowLimiter()
+
+
+def client_ip(request: Request) -> str:
+    """取客户端真实 IP。
+
+    线上 nginx 反代后 request.client.host 恒为 127.0.0.1，必须依赖 X-Forwarded-For。
+    nginx.conf 已用 `proxy_set_header X-Forwarded-For $remote_addr` 覆盖该头，
+    因此**最后一项（也是唯一一项）即真实客户端 IP**，取最后项可防御客户端伪造 XFF 头。
+    开发直连（无该头）时回退 client.host。
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        # 取最后一项：nginx 用 $remote_addr 覆盖时只有一项；即使有逗号分隔也是覆盖后的单一 IP。
+        return xff.split(",")[-1].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def rate_limit(limit: int, window: float):
+    """FastAPI 依赖工厂：同一 IP 在 window 秒内最多 limit 次，超限抛 429。
+
+    用法：def handler(..., _rl: None = Depends(rate_limit(30, 60))): ...
+    可叠加多个（如每分钟 + 每小时各一层）。
+    """
+
+    def dependency(request: Request) -> None:
+        if not config.RATE_LIMIT_ENABLED:
+            return None
+        if not _limiter.allow(client_ip(request), limit, window):
+            raise HTTPException(status_code=429, detail="请求太频繁，请稍后再试")
+        return None
+
+    return dependency

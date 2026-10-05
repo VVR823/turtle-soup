@@ -1,0 +1,21 @@
+# 海龟汤后端镜像：FastAPI + uvicorn
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# pip 国内源 + 超时/重试，避免 PyPI 直连超时（国内服务器网络不稳）
+ENV PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+ENV PIP_TRUSTED_HOST=mirrors.aliyun.com
+
+# 先装依赖（利用镜像层缓存，改代码不会反复重装）
+COPY requirements.txt .
+RUN pip install --no-cache-dir --retries 10 --timeout 120 -r requirements.txt
+
+# 再拷源码（backend/.dockerignore 已排除 data/、.env、venv）
+COPY . .
+
+# 数据目录由 docker-compose 的 volumes 映射到宿主机 /opt/turtle-soup/backend/data，
+# 因此容器内的 /app/data 即为持久化的 SQLite / traces / 反馈文件。
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

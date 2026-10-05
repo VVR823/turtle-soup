@@ -1,0 +1,161 @@
+@import "tailwindcss";
+
+/* ============================================================
+   设计系统令牌（Design Tokens）
+   全部为暗色（dark-first）。工具类由 Tailwind v4 自动生成：
+   bg-canvas / bg-surface / text-fg / text-fg-muted / border-border /
+   bg-accent / text-accent-text / text-success / text-danger / ring-ring /
+   font-sans(正文) / font-display(衬线标题)。
+   ============================================================ */
+@theme {
+  /* 基础 / 表面 / 边框 */
+  --color-canvas: #0B0B12;
+  --color-surface: #15151F;
+  --color-surface-2: #1C1C28;
+  --color-elevated: #20202E;
+  --color-border: #2A2A3A;
+  --color-border-strong: #3A3A4D;
+
+  /* 文字 */
+  --color-fg: #F4F4F8;
+  --color-fg-muted: #C4C4D0;
+  --color-fg-subtle: #8E8E9E;
+
+  /* 品牌强调（暖金 amber） */
+  --color-accent: #F59E0B;
+  --color-accent-fg: #1A1206;
+  --color-accent-text: #FBBF24;
+  --color-ring: #FBBF24;
+
+  /* 语义色 */
+  --color-success: #34D399;
+  --color-danger: #F87171;
+  --color-danger-strong: #EF4444;
+
+  /* 字体（纯系统字体栈，零网络依赖；中文回退系统衬线/无衬线）
+     展示字用衬线（中文 Songti/Noto Serif SC → 文学/悬疑感），正文用系统无衬线。 */
+  --font-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-display: "Noto Serif SC", "Songti SC", "STSong", Georgia, "Times New Roman", serif;
+}
+
+/* ============================================================
+   基础层（Base）
+   ============================================================ */
+@layer base {
+  html {
+    color-scheme: dark;
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+    max-width: 100vw;
+  }
+
+  /* iOS Safari：输入框字体小于 16px 会自动放大，统一要求最小 16px */
+  input, textarea, select {
+    font-size: 16px;
+  }
+
+  /* 键盘可见焦点环：统一金色，绝不移除 */
+  a:focus-visible,
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* 减少动画：直接呈现终态，关闭位移/旋转/弹跳 */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* ============================================================
+   组件层（Components）：统一状态，禁止各处手写散落 hover
+   ============================================================ */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-all duration-200 cursor-pointer select-none min-h-11 disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-accent {
+    @apply bg-accent/10 border border-accent/30 text-accent-text hover:bg-accent/20 hover:border-accent/50 active:scale-95;
+  }
+  .btn-ghost {
+    @apply bg-transparent border border-border text-fg-muted hover:bg-surface-2 hover:text-fg;
+  }
+  .btn-solid {
+    @apply bg-accent text-accent-fg border border-transparent hover:bg-accent/90 active:scale-95;
+  }
+  .card {
+    @apply bg-surface border border-border rounded-2xl;
+  }
+  .panel {
+    @apply bg-surface-2 border border-border rounded-xl;
+  }
+  .input {
+    @apply w-full bg-canvas border border-border-strong rounded-xl px-4 py-3 text-sm text-fg placeholder-fg-subtle transition-all min-h-12 disabled:opacity-50;
+  }
+}
+
+/* 滚动条（暗色） */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3A3A4D; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #4A4A5D; }
+
+/* ============================================================
+   动效（Motion）
+   说明：本项目不引入 motion 库（构建环境无外网），动效用纯 CSS 实现。
+   无障碍：base 层已对 prefers-reduced-motion 将动画/过渡时长归零，
+   下方动画在减弱动效模式下会自动瞬时到达终态，不闪跳。
+   ============================================================ */
+@keyframes message-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-message-in {
+  animation: message-in 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.animate-fade-up {
+  animation: fade-up 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* 反馈按钮呼吸光环：吸引用户注意「提交主持人回答 Bug」入口。
+   同时保留红色投影；减弱动效模式下由 base 层自动归零。 */
+@keyframes fb-breathe {
+  0%, 100% {
+    box-shadow: 0 8px 24px rgba(239, 68, 68, 0.35), 0 0 0 0 rgba(239, 68, 68, 0.5);
+  }
+  50% {
+    box-shadow: 0 8px 24px rgba(239, 68, 68, 0.35), 0 0 0 12px rgba(239, 68, 68, 0);
+  }
+}
+.fb-breathe {
+  animation: fb-breathe 2.2s ease-in-out infinite;
+}
+
+/* 形状一致性系统（Shape Consistency Lock）：
+   交互元素（按钮/输入）12px，容器（卡片/面板）16px，圆形胶囊用 full。
+   全站统一，不在同一页面混用多套半径。 */

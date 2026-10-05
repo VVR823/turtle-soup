@@ -1,0 +1,23 @@
+# 海龟汤前端镜像：Next.js 16（standalone 输出）
+FROM node:20-slim
+
+WORKDIR /app
+
+# 先装依赖（利用层缓存；有 lock 时按 lock 确定性安装）
+COPY package.json package-lock.json ./
+RUN npm install
+
+# 再拷源码并构建（frontend 的 build context 是仓库根，.dockerignore 已排除 backend/、node_modules、.next）
+COPY . .
+
+# NEXT_PUBLIC_API_BASE 设为空字符串 => 前端使用相对路径 /api，由 nginx 反代到后端
+ENV NEXT_PUBLIC_API_BASE=""
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build \
+    && cp -r .next/static .next/standalone/.next/static \
+    && (cp -r public .next/standalone/public 2>/dev/null || true)
+
+# standalone 产物自带所需依赖，从 standalone 目录启动
+WORKDIR /app/.next/standalone
+EXPOSE 3000
+CMD ["node", "server.js"]
