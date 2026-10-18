@@ -1,0 +1,2 @@
+# Frozen baseline sources are byte-verified evidence; checkout must preserve them exactly.
+backend/eval/frozen_ts01_sources/** -text
