@@ -17,7 +17,7 @@
 
 ## 当前实现与边界
 
-当前正式验收为 54/60。剩余项目是远程 CI/跨平台证据、一次真人语义审核与发布、可选的域名/TLS，以及后续个人讲解学习；详情以[验收进度快照](ACCEPTANCE_PROGRESS.md)为准。
+当前正式验收为 56/60。剩余项目是一次真人语义审核与发布、可选的域名/TLS，以及后续个人讲解学习；详情以[验收进度快照](ACCEPTANCE_PROGRESS.md)为准。
 
 - 主持人判定链：特殊剧情/流程 → 来源绑定的整句或全分句规则（含精确元数据）→ 是否问法提醒 → 完整汤底和有界证据/历史的模型兜底；模糊相似度和宽正则不直接决定答案。
 - SQLite 保存会话、消息、版本化基线、反馈、审计、Agent 任务和规则发布记录；必要业务审计同事务、HTTP 尝试独立有界保存，见[请求审计](docs/request-audit.md)。生产迁移、停写恢复和 release 回滚已验证，私密 Trace 与真实玩家数据不进入 Git。
@@ -68,7 +68,7 @@ npm run typecheck
 
 `pyproject.toml + uv.lock` 和 `package.json + package-lock.json` 是安装依据；`requirements.txt` 仅保留旧 pip 部署兼容性，不保证传递依赖复现。不要复用本机损坏的旧 `.venv`。
 
-测试步骤、报错处理和真实模型 opt-in 见 [离线测试操作指南](docs/testing.md)。CI 配置已加入，但没有远程运行证据，不能称为 CI 已通过。
+测试步骤、报错处理和真实模型 opt-in 见 [离线测试操作指南](docs/testing.md)。公开仓库的远程 CI 已在 Ubuntu/Windows 与 Python 3.11/3.12/3.13 矩阵通过，见 [GitHub Actions 运行记录](https://github.com/VVR823/turtle-soup/actions/runs/39137676612)。
 
 ## 本地开发与部署
 
