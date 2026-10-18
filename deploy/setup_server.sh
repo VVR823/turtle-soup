@@ -83,7 +83,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/turtle-soup/backend
-ExecStart=/opt/turtle-soup/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/turtle-soup/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 Restart=always
 RestartSec=3
 

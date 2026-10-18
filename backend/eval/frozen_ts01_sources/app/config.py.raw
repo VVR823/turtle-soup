@@ -1,0 +1,124 @@
+"""Explicit configuration loading, with no dotenv reads during import.
+
+Production loads environment > backend/.env > root/.env.local at startup.
+Tests pass Settings.for_test(...) and never load personal/provider configuration.
+Provider availability and free eligibility must be verified, not inferred here.
+"""
+import os
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+from typing import Mapping
+from .paths import canonical_path
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = BACKEND_DIR.parent
+
+
+@dataclass(frozen=True, slots=True)
+class Settings:
+    DATA_DIR: Path = BACKEND_DIR / "data"
+    TESTING: bool = False
+    TEST_INSTANCE_ID: str = ""
+    LOAD_RUNTIME_PUZZLES: bool = True
+    ALLOW_REAL_MODEL: bool = True
+    LLM_PROVIDER: str = "ollama"
+    OLLAMA_BASE_URL: str = "http://localhost:11434/v1"
+    OLLAMA_MODEL: str = "qwen2.5:7b"
+    QWEN_API_KEY: str = field(default="", repr=False)
+    QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    QWEN_MODEL: str = "qwen-turbo"
+    SILICONFLOW_API_KEY: str = field(default="", repr=False)
+    SILICONFLOW_BASE_URL: str = "https://api.siliconflow.cn/v1"
+    SILICONFLOW_MODEL: str = "Qwen/Qwen2.5-7B-Instruct"
+    ZHIPU_API_KEY: str = field(default="", repr=False)
+    ZHIPU_BASE_URL: str = "https://open.bigmodel.cn/api/paas/v4"
+    ZHIPU_MODEL: str = "glm-4-flash"
+    CORS_ORIGINS: tuple[str, ...] = ("http://localhost:3000", "http://127.0.0.1:3000")
+    SITE_PASSWORD: str = field(default="", repr=False)
+    ADMIN_TOKEN: str = field(default="", repr=False)
+    RATE_LIMIT_ENABLED: bool = True
+    ENABLE_TRACE: bool = True
+
+    def __post_init__(self):
+        path = canonical_path(self.DATA_DIR)
+        object.__setattr__(self, "DATA_DIR", path)
+        if self.TESTING and any(
+            path == canonical_path(root) or path.is_relative_to(canonical_path(root))
+            for root in (BACKEND_DIR / "data", PROJECT_ROOT / "data")
+        ):
+            raise ValueError("Test settings require a separate temporary data directory")
+
+    @classmethod
+    def for_test(cls, data_dir: Path, **overrides) -> "Settings":
+        values = dict(
+            DATA_DIR=data_dir, TESTING=True, LOAD_RUNTIME_PUZZLES=False,
+            ALLOW_REAL_MODEL=False, LLM_PROVIDER="fake",
+            RATE_LIMIT_ENABLED=False, ENABLE_TRACE=False,
+        )
+        values.update(overrides)
+        return cls(**values)
+
+
+def load_settings(
+    *, environ: Mapping[str, str] | None = None, load_env: bool = True,
+    backend_dir: Path = BACKEND_DIR,
+) -> Settings:
+    """Load explicitly; no process-global environment mutation or key logging."""
+    supplied = dict(os.environ if environ is None else environ)
+    if supplied.get("TURTLE_SOUP_TESTING") == "1":
+        load_env = False
+    values: dict[str, str] = dict(supplied)
+    if load_env:
+        from dotenv import dotenv_values
+        from dotenv.variables import parse_variables
+        # Mirror load_dotenv(override=False), but without mutating os.environ.
+        # Interpolation sees process values and the previously loaded file first.
+        for file in (backend_dir / ".env", backend_dir.parent / ".env.local"):
+            resolved: dict[str, str] = {}
+            for key, raw in dotenv_values(file, interpolate=False).items():
+                if raw is not None:
+                    context = {**resolved, **values}
+                    resolved[key] = "".join(atom.resolve(context) for atom in parse_variables(raw))
+            for key, value in resolved.items():
+                values.setdefault(key, value)
+    defaults = Settings()
+    result = {}
+    for item in fields(Settings):
+        name = item.name
+        env_name = {
+            "DATA_DIR": "TURTLE_SOUP_DATA_DIR",
+            "TESTING": "TURTLE_SOUP_TESTING",
+            "LOAD_RUNTIME_PUZZLES": "TURTLE_SOUP_LOAD_RUNTIME_PUZZLES",
+            "ALLOW_REAL_MODEL": "TURTLE_SOUP_ALLOW_REAL_MODEL",
+        }.get(name, name)
+        raw = values.get(env_name)
+        if raw is None:
+            continue
+        default = getattr(defaults, name)
+        if isinstance(default, bool):
+            if raw not in ("0", "1"):
+                raise ValueError(f"{env_name} must be 0 or 1")
+            result[name] = raw == "1"
+        elif isinstance(default, tuple):
+            result[name] = tuple(x.strip() for x in raw.split(",") if x.strip()) if raw else default
+        elif isinstance(default, Path):
+            if not raw.strip():
+                raise ValueError(f"{env_name} cannot be empty")
+            result[name] = Path(raw)
+        else:
+            result[name] = raw
+    if result.get("TESTING"):
+        result.setdefault("LOAD_RUNTIME_PUZZLES", False)
+        result.setdefault("ALLOW_REAL_MODEL", False)
+        result.setdefault("LLM_PROVIDER", "fake")
+        result.setdefault("RATE_LIMIT_ENABLED", False)
+        result.setdefault("ENABLE_TRACE", False)
+    return Settings(**result)
+
+
+def __getattr__(name: str):
+    """Keep legacy config.NAME callers while resolving the active app settings."""
+    if name in Settings.__dataclass_fields__:
+        from .runtime import get_runtime
+        return getattr(get_runtime().settings, name)
+    raise AttributeError(name)

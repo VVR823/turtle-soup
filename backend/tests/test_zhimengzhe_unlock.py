@@ -1,12 +1,20 @@
 # -*- coding: utf-8 -*-
 """织梦者特殊评分映射与彩蛋解锁（源自 tests/online/test_zhimengzhe_unlock.py）。
 
-覆盖 6 个 checkpoint → 真实完成度 ~86% → special_scoring 映射后 ≥70% → 解锁 xinshijie。
+模拟正确回答覆盖要点 → 当前 special_scoring 门槛解锁；
+模拟无关回答不能解锁。这是状态/评分集成证据，不是真实模型准确率。
+严格评分和移除虚高映射仍由 TS-07 完成。
 """
+import pytest
+
 from .conftest import make_session
 
 
-def test_zhimengzhe_unlock_xinshijie(client):
+@pytest.mark.parametrize("scripted_answer,expected_unlock", [("是", "xinshijie"), ("与此无关", None)])
+def test_zhimengzhe_unlock_xinshijie(client, scripted_answer, expected_unlock):
+    # Script the transport explicitly: conservative rules now defer narrator
+    # references with history to the model instead of unsafe regex shortcuts.
+    client.app.state.runtime.model.answer = scripted_answer
     sid = make_session(client, "zhimengzhe", level="tianyi")
     questions = [
         "催眠我的人是我妻子吗",   # 主角被妻子催眠
@@ -21,4 +29,4 @@ def test_zhimengzhe_unlock_xinshijie(client):
         assert d.get("reply") in ("是", "不是", "是也不是", "算是", "与此无关"), f"{q} -> {d}"
 
     ev = client.post("/api/evaluate", json={"sessionId": sid}).json()
-    assert ev.get("unlockSoupId") == "xinshijie", f"应解锁 xinshijie，实际: {ev.get('unlockSoupId')}"
+    assert ev.get("unlockSoupId") == expected_unlock

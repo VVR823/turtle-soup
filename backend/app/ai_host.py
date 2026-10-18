@@ -1,84 +1,29 @@
 """AI 主持人核心逻辑（平移自前端 src/lib/ai-host.ts，并用 LangChain 重写 LLM 调用层）。
 
-流程（与前端行为一致）：
-  0. 是否类检测（非是否类 → 只提醒、不扣次数）
-  0.5 易错点确定性兜底（confusionPoints 正则命中即返回标答，先于 LLM，杜绝"该说不是却和稀泥"）
-  1. RAG 关键词匹配 checkpoints（命中 → 直接返回预设判定）
-  2. 以上都不命中 → LangChain 调大模型判定
+流程：独立游戏流程 → 完整范围、来源绑定的规则 → 是否类提醒 → 上下文模型。
+候选检索、宽正则和相似度不再拥有在线答案权限。
 
-复盘评估（evaluate_completion）用 LangChain + JsonOutputParser 输出结构化完成度。
+复盘评估目前使用确定性规则；严格评分与完整结果快照由 TS-07 完成。
 """
 import os
 import re
 import random
-import httpx
+import time
 from typing import List, Optional
 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
-
-from . import config
 from .prompts import HOST_SYSTEM_PROMPT
-from .schemas import Soup, ConfusionPoint, Checkpoint, EvaluationResult, SymbolMapping, HostJudgment
-from . import rag
+from .schemas import Soup, ConfusionPoint, Checkpoint, HostResult, HostVersions, HOST_ENGINE_VERSION
+from . import rag  # legacy diagnostics only; not online answer authority
 
 
 # ===================== LLM 客户端（LangChain ChatOpenAI） =====================
-_llm_cache: dict = {}
-
-# 共享 HTTP 连接池：避免每次 LLM 调用都重新 TLS 握手（省几十 ms/次）。
-# 挂到模块级，进程生命周期内复用连接；线程安全由 httpx 内部保证。
-_http_client = httpx.Client(
-    timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0),
-)
-
-
-def _get_llm(max_tokens: int = 50) -> ChatOpenAI:
-    """懒加载并缓存 ChatOpenAI 实例（兼容 OpenAI 协议）：ollama / zhipu / siliconflow / cloud。"""
-    if max_tokens not in _llm_cache:
-        if config.LLM_PROVIDER == "ollama":
-            # 本地 Ollama：0 成本，api_key 仅占位（Ollama 不校验）
-            _llm_cache[max_tokens] = ChatOpenAI(
-                model=config.OLLAMA_MODEL,
-                api_key="ollama",
-                base_url=config.OLLAMA_BASE_URL,
-                temperature=0.1,
-                max_tokens=max_tokens,
-                http_client=_http_client,
-            )
-        elif config.LLM_PROVIDER == "siliconflow":
-            # 硅基流动：选带「免费」标签的小模型即可 0 成本（不消耗赠送额度）
-            _llm_cache[max_tokens] = ChatOpenAI(
-                model=config.SILICONFLOW_MODEL,
-                api_key=config.SILICONFLOW_API_KEY,
-                base_url=config.SILICONFLOW_BASE_URL,
-                temperature=0.1,
-                max_tokens=max_tokens,
-                http_client=_http_client,
-            )
-        elif config.LLM_PROVIDER == "zhipu":
-            # 智谱 AI：GLM-4-Flash 永久免费，无需充值，能力优于 7B 级小模型
-            _llm_cache[max_tokens] = ChatOpenAI(
-                model=config.ZHIPU_MODEL,
-                api_key=config.ZHIPU_API_KEY,
-                base_url=config.ZHIPU_BASE_URL,
-                temperature=0.1,
-                max_tokens=max_tokens,
-                http_client=_http_client,
-            )
-        else:
-            # 云端 API（通义/智谱/DeepSeek 等，需自备 key 或额度）
-            _llm_cache[max_tokens] = ChatOpenAI(
-                model=config.QWEN_MODEL,
-                api_key=config.QWEN_API_KEY,
-                base_url=config.QWEN_BASE_URL,
-                temperature=0.1,
-                max_tokens=max_tokens,
-                http_client=_http_client,
-            )
-    return _llm_cache[max_tokens]
+def _get_llm(max_tokens: int = 50):
+    """Legacy injected-model access only; real calls must use the owned gateway."""
+    from .runtime import get_runtime
+    runtime = get_runtime()
+    if runtime.model is not None:
+        return runtime.model
+    raise RuntimeError("Legacy real model access is disabled; use the owned model gateway")
 
 
 # ===================== 是否类检测 =====================
@@ -126,6 +71,10 @@ def is_yes_no_question(question: str) -> bool:
     for kw in non_yes_no_keywords:
         if kw in q:
             return False
+
+    # 海龟汤玩家也会直接陈述时间存在关系来请求确认，不一定带“吗”。
+    if re.search(r"(?:还|仍)?存在于", q) and len(q) <= 30:
+        return True
 
     # 句末语气词：吗 / 么（排除"什么/怎么/为什么/这么/多么"——已由上方处理）
     if re.search(r"吗\s*[？?！!]?\s*$", q):
@@ -245,28 +194,17 @@ def is_meta_progress_question(question: str) -> bool:
     return any(re.search(p, question) for p in _META_PROGRESS_PATTERNS)
 
 
-def format_progress_hint(soup: Soup, history: List[dict]) -> str:
-    """根据当前问答记录提示玩家当前完成度（不暴露未触及的 checkpoint 关键词）。"""
-    # 复用 evaluate_completion 的纯计算逻辑（不修改会话状态）
-    qa_text = "\n".join(
-        f"{'玩家' if m.get('role') == 'user' else '主持人'}：{m.get('content', '')}"
-        for m in history
-        if m.get("role") in ("user", "host")
-    )
-    try:
-        result = evaluate_completion(soup, qa_text, messages=history)
-        completion = result.get("completion", 0)
-        if completion >= 100:
-            return f'🎯 当前完成度 {completion}% 已经满了！可以点左侧「🏁 揭晓答案」直接通关~'
-        if completion == 0:
-            return f'🎯 当前完成度约 {completion}%，继续从侧面提问来推进推理吧~'
-        if completion < 40:
-            return f'🎯 当前完成度约 {completion}%，刚开了个头，继续问~'
-        if completion < 70:
-            return f'🎯 当前完成度约 {completion}%，方向对了，但还有关键情节没触及。'
-        return f'🎯 当前完成度约 {completion}%，已经很接近了，再深挖一下~'
-    except Exception:
-        return '🎯 可以点击左侧「🏁 揭晓答案」查看当前完成度和汤底；也可以继续从侧面提问推进~'
+def format_progress_hint(soup: Soup, history: List[dict], *, versions: HostVersions | None = None) -> str:
+    """只报同一严格计分器的汇总进度，不在游戏中泄露要点或证据。"""
+    from .scoring import ConfirmedTurn
+    if versions is None or versions.puzzleVersion == "unversioned":
+        return '🎯 这份历史没有可核验的计分记录，完成度暂不能确认；还原程度尚未独立评估。可以继续提问或点「🏁 揭晓答案」。'
+    turns = tuple(message["confirmedTurn"] for message in history
+                  if isinstance(message.get("confirmedTurn"), ConfirmedTurn))
+    result = evaluate_completion(soup, "", turns=turns, versions=versions)
+    plot = (f' 剧情进度 {result["plotProgress"]}%（非还原评分）。' if result["plotProgress"] is not None else '')
+    return (f'🎯 已确认事实覆盖（完成度）{result["verifiedCoverage"]}%。'
+            f'还原程度尚未独立评估。{plot}可以继续提问，或点「🏁 揭晓答案」对照汤底。')
 
 
 _REVEAL_KEYWORDS = [
@@ -296,10 +234,9 @@ def format_reveal_reminder() -> str:
 
 
 # ===================== 易错点确定性兜底 =====================
-# 喂给 LLM 的自动合并规则上限（手写易错点全部保留；自动规则只取最近 N 条，
-# 避免玩家反馈按天累积（如一天100条）导致 prompt 上下文爆炸、主持人变慢变笨。
-# 注意：确定性匹配层 match_confusion_point 仍遍历【全部】规则，旧 bug 修复不会丢失，
-# 只是不再全量塞进 LLM 提示词——规则命中了根本轮不到 LLM。
+# 以下文本/宽匹配工具仅保留给旧诊断与评分兼容，不参与在线确定性回答。
+# 在线上下文由 host_context 保留完整汤底与有界完整候选证据；
+# 玩家反馈发布/来源审核由 TS-10 完成，不把旧规则文本当独立人工质量证明。
 AUTO_CP_PROMPT_LIMIT = 60
 
 
@@ -528,38 +465,28 @@ def generate_reply_from_checkpoint(cp: Checkpoint) -> str:
 
 
 # ===================== 复合陈述处理 =====================
-_CLAUSE_SEPARATORS = set("，。,；; ")
-_CLAIM_MARKERS = ["是", "被", "有", "在"]
-
-
 def is_compound_statement(question: str) -> bool:
     """检测玩家是否把多个独立判断揉在一句话里（复合陈述）。
 
     复合陈述的典型特征：
-    - 句子较长（>=13 字）且包含分句/空格等分隔符；
-    - 或包含多个断言词（是/被/有/在），难以用单个易错点判定整体对错。
+    - 句子较长，且包含至少两个内部的分句分隔符；
+    - 或使用两个及以上空格明确列出多个判断。
 
     注意：
-    - "是不是/是否/有没有/能不能/可不可以"等疑问结构只算一个整体；
+    - 单个逗号常用于把主题和同一个判断隔开，不能据此判为复合陈述；
     - 单个空格（如"我 爸妈 妻子"这种列表写法）不视为复合分句，只有 2 个及以上空格才计入。
     """
     q = question.strip()
     if len(q) < 12:
         return False
-    # 中文/英文标点分隔符
-    sep_count = sum(1 for c in q if c in "，。,；;")
+    # 句末标点不是分句；只有多个内部分隔符才足以证明存在多个判断。
+    body = q.rstrip("。；;，,、 ")
+    sep_count = sum(1 for c in body if c in "，。,；;、")
     # 空格只有在出现 2 次及以上时才视为复合分隔（避免"我 爸妈 妻子"被误判）
     space_count = q.count(" ")
     if space_count >= 2:
-        sep_count += space_count
-    if sep_count >= 1 and len(q) >= 13:
         return True
     if sep_count >= 2:
-        return True
-    # 把疑问结构替换为占位符，避免"是不是"被拆成两个"是"
-    q_for_markers = re.sub(r"是不是|是否|有没有|有木有|能不能|可不可以|能否|会不会", "¿", q)
-    marker_count = sum(q_for_markers.count(m) for m in _CLAIM_MARKERS)
-    if len(q) >= 16 and marker_count >= 2:
         return True
     return False
 
@@ -682,179 +609,81 @@ def check_win_condition(soup: Soup, text: str) -> Optional[str]:
     return wc.get("message")
 
 
-# ===================== 变格元素通用规则 =====================
-# genre=变格 的汤，玩家问"有穿越/灵异/魔法等元素吗"时确定性答是（汤里几乎都含变格元素）；
-# 否定形式（"没有X吗"）答不是。是 match_genre_answer 的语义补充：genre 规则只匹配"本格/变格"标志词，
-# 这条覆盖变格元素的具体问法，避免全靠 LLM 免费模型瞎猜（曾误答"不是"）。
-_SUPERNATURAL_KEYWORDS = [
-    "穿越", "时空穿越", "时空逆行", "时间倒流", "时间倒着", "时间逆行",
-    "平行世界", "平行宇宙", "平行时空", "多元宇宙",
-    "超自然", "灵异", "灵异事件", "鬼怪", "闹鬼", "招魂",
-    "魔法", "魔幻", "魔法少女", "修仙", "妖怪", "异能", "特异功能",
-    "恶魔", "附身", "被附身", "召唤", "变身", "复活", "不死",
-    "吸血鬼", "狼人", "僵尸", "幽灵",
-    "幻觉", "幻象", "灵魂出窍", "催眠", "轮回", "因果循环",
-]
-
-
+# ===================== 精确元数据兼容入口 =====================
 def match_supernatural_answer(soup: Soup, question: str) -> Optional[str]:
-    """ genre=变格时，玩家问"有/是/存在{变格元素}吗"确定性答是；否定形式答不是。不命中返回 None。"""
-    if (soup.genre or "") != "变格":
-        return None
-    q = question.strip()
-    hit_kw = next((kw for kw in _SUPERNATURAL_KEYWORDS if kw in q), None)
-    if not hit_kw:
-        return None
-    rkw = re.escape(hit_kw)
-    # 否定形式：问"没有/不是/不存在 X 吗"
-    if re.search(r"(没有|不是|不存在|没)\s*.{0,6}" + rkw, q):
-        return "不是"
-    # 肯定形式：含"有/是/存在/发生了 + 关键词" 或"故事里 X"
-    if re.search(r"(有|是|存在|发生了?|真的|算)\s*.{0,8}" + rkw, q) or \
-       re.search(r"故事.{0,6}" + rkw, q) or \
-       re.search(rkw + r".{0,6}(对吧|吧)", q):
-        return "是"
-    return None
-
-
-# ===================== 本格/变格 类型问题确定性兜底（通用规则） =====================
-_GENRE_QUESTION_MARKERS = ["吗", "么", "是不是", "是否", "算不算", "算", "属于", "还是", "吧", "？", "?"]
+    """Specific presence/absence requires a specific structured source fact."""
+    from .host_rules import presence_answer
+    return presence_answer(soup, question)
 
 
 def match_genre_answer(soup: Soup, question: str) -> Optional[str]:
-    """玩家问"这是本格吗/这是变格吗/有变格元素吗"等类型问题时，按汤的 genre 字段确定性作答。
-
-    - 汤必须有 genre（"本格"/"变格"），否则返回 None 走原流程；
-    - 同时提及"本格"和"变格"（如"本格还是变格"）返回 None，交给 LLM；
-    - 只有孤立关键词（如只发"本格"二字）不当作类型问题，避免误答。
-    """
-    genre = (getattr(soup, "genre", "") or "").strip()
-    if genre not in ("本格", "变格"):
-        return None
-    q = question.strip()
-    has_benge = "本格" in q
-    has_biange = "变格" in q
-    if not (has_benge or has_biange):
-        return None
-    if has_benge and has_biange:
-        return None
-    if not any(m in q for m in _GENRE_QUESTION_MARKERS):
-        return None
-    kw = "本格" if has_benge else "变格"
-    return "是" if genre == kw else "不是"
-
-
-# ===================== 人数问题确定性兜底（通用规则） =====================
-# 口径（用户 2026-08-24 定义）：玩家问"故事里只有xx人"时，这个数量指「故事中有作用 /
-# 有指定称呼 / 有名有姓的真实人物实体数」。
-#   - 同一真人用不同称呼（如妈妈=妻子）只算 1 个实体；
-#   - 村民 / 人们 / 围观群众 / 台下众人 等大规模泛指群体不算；
-#   - 演员扮演的非真实角色（如《噩梦重现》里的"妻子/父母"）不算真实人物；
-#   - 未出生的胎儿不计为独立"人"。
-# soup.castCount 即按此口径标注的整数；为 None 则该汤不触发此规则。
-_CAST_CN_NUM = {
-    "零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
-    "六": 6, "七": 7, "八": 8, "九": 9,
-}
-
-
-def _cn_to_int(token: str) -> Optional[int]:
-    """把阿拉伯数字或简单中文数字（0~99）转成 int。"""
-    s = (token or "").strip()
-    if not s:
-        return None
-    if s.isdigit():
-        return int(s)
-    if s in _CAST_CN_NUM:
-        return _CAST_CN_NUM[s]
-    # 含「十」的中文数字：十 / 十X / X十 / X十Y
-    if "十" in s:
-        left, _, right = s.partition("十")
-        if left == "" and right == "":
-            return 10
-        if right == "":  # X十 -> X*10
-            return _CAST_CN_NUM.get(left, 1) * 10
-        if left == "":  # 十X -> 10+X
-            return 10 + _CAST_CN_NUM.get(right, 0)
-        return _CAST_CN_NUM.get(left, 1) * 10 + _CAST_CN_NUM.get(right, 0)
-    return None
-
-
-_CAST_SUBSET_KEYWORDS = [
-    "死", "活", "参与", "出现", "认识", "知道", "看见", "在场", "幸存",
-    "失踪", "被杀", "遇害", "身亡", "活着", "到场的", "在场的",
-]
-
-# 人数限定问法正则（预编译）：
-#   (限定词|总括词) 必选 + (≤15字人名/修饰)? + 数字 + (个|口)? + 人 + (吗/么/吧/是…吗/？)?
-#   limiter 必选（含"只有/仅/就/一共/总共/共/才/不过"等限定词，以及"故事/汤/旅馆/整个/里面"等总括词），
-#   避免"旅馆里只有七个人吗"被前缀吞掉 limiter 而误判为 None。
-# 例："只有四个人吗" / "只有我和爸爸两个人吗" / "一家七口人吗" / "两个人是新人吗" / "旅馆里只有七个人吗"
-_CAST_RE = re.compile(
-    r"(只有|仅有|就|一共|总共|共|仅|才|不过|故事|汤|整个|里面|全部|旅馆|现场|当时|全程)\s*"
-    r".{0,15}?\s*"
-    r"([0-9]+|[零一二两三四五六七八九十百]+)\s*"
-    r"(?:个|口)?\s*人\s*"
-    r"(?:吗|么|吧|对吗|对吧|？|\?|是[^吗么吧？?]{0,12}(?:吗|么|吧|？|\?))?\s*$"
-)
+    from .host_rules import genre_answer
+    return genre_answer(soup, question)
 
 
 def match_cast_count(soup: Soup, question: str) -> Optional[str]:
-    """玩家问'故事里只有N个人吗'时，按 soup.castCount 确定性作答。
-
-    仅匹配"总人数"限定问法：含限定词（只有/仅有/就/一共/总共/共/仅/才/不过/是）
-    或"故事/汤/整个/里面"等总括词 + 数字 + 人 + 吗/么/吧/？。
-
-    排除问"死/活/参与/出现"等某子集人数的情形，避免误判。
-    命中：N == castCount -> 是；否则 -> 不是。
-    """
-    cc = getattr(soup, "castCount", None)
-    if cc is None:
-        return None
-    q = question.strip()
-    # 子集限定词：问的是"死/活/参与/认识"的某部分人，不是总人数 -> 交原流程
-    if any(kw in q for kw in _CAST_SUBSET_KEYWORDS):
-        return None
-    if not re.search(r"人", q):
-        return None
-    m = _CAST_RE.search(q)
-    if not m:
-        return None
-    num = _cn_to_int(m.group(2))
-    if num is None:
-        return None
-    return "是" if num == cc else "不是"
+    """Total entity count only; subsets/conditions/other places defer."""
+    from .host_rules import count_answer
+    return count_answer(soup, question)
 
 
 # ===================== 主入口：处理玩家消息 =====================
+def _answer_result(answer: str, marker: str | None, *, display: str | None = None) -> HostResult:
+    return HostResult(kind="answer", answer=answer, chargeable=True, source="deterministic",
+                      reply=display or answer, matchedCheckpoint=marker)
+
+
+def _reminder_result(reply: str, marker: str | None = None) -> HostResult:
+    return HostResult(kind="reminder", chargeable=False, source="flow", reply=reply, matchedCheckpoint=marker)
+
+
 def handle_host_response(
     soup: Soup,
     history: List[dict],
     user_question: str,
-) -> dict:
+    *, versions: HostVersions | None = None, rule_snapshot=None,
+) -> HostResult:
+    from .host_evidence import validate_puzzle_snapshot
+    from .question_normalization import NORMALIZATION_VERSION
+    selected = versions or HostVersions()
+    if (not isinstance(selected, HostVersions) or selected.engineVersion != HOST_ENGINE_VERSION
+            or selected.normalizationVersion != NORMALIZATION_VERSION):
+        raise ValueError("Unsupported host implementation version")
+    if selected.puzzleVersion != "unversioned":
+        # Validate actual source even on cache hits, before trusting its key.
+        validate_puzzle_snapshot(soup, selected.puzzleVersion)
+    options = {}
+    if rule_snapshot is not None:
+        from .rule_contract import verify_rule_snapshot
+        options["rule_snapshot"] = verify_rule_snapshot(rule_snapshot, soup, selected)
+    result = _handle_host_response(soup, history, user_question, versions=selected, **options)
+    return HostResult.model_validate({**result.model_dump(), "versions": selected})
+
+
+def _handle_host_response(soup: Soup, history: List[dict], user_question: str, *,
+                          versions: HostVersions, rule_snapshot=None) -> HostResult:
+    from .question_normalization import normalize_exact_question
+    try:
+        question_key = normalize_exact_question(user_question)
+    except ValueError:
+        # Punctuation-only input is an ordinary incomplete question, not a
+        # provider/transport failure. Exact-key's strict pure API stays strict.
+        return _reminder_result("🤔 请补充一个具体的判断问题，例如「小明是凶手吗？」；这次不扣次数。")
+    if question_key in {"吗", "么", "吧", "对吗", "对吧", "是吗"}:
+        return _reminder_result("🤔 请补充你想确认的事情，再用是否问法提问；这次不扣次数。")
     # 0. 隐藏彩蛋通关条件（最高优先级）：玩家同时提及关键设定即判定通关，
     # 直接返回祝贺语并标记 is_win，不再走 always_yes 的普通"是"。
     win_msg = check_win_condition(soup, user_question)
     if win_msg:
-        return {
-            "reply": win_msg,
-            "is_reveal": True,
-            "is_giveup": False,
-            "is_win": True,
-            "matched_checkpoint": "win_condition",
-        }
+        return HostResult(kind="win", chargeable=True, source="deterministic", reply=win_msg,
+                          matchedCheckpoint="win_condition")
 
     # 特殊汤：always_yes（彩蛋汤《新世界》）。
     # 玩家问什么，主持人都回答"是"，因为世界是被编造的想象空间；
     # 非是否类问题仍引导改问法（保持统一交互）。
     if soup.always_yes:
         if not is_yes_no_question(user_question):
-            return {
-                "reply": format_yes_no_reminder(user_question),
-                "is_reveal": False,
-                "is_giveup": False,
-                "matched_checkpoint": None,
-            }
+            return _reminder_result(format_yes_no_reminder(user_question))
         hesitations = [
             "是",
             "是",
@@ -863,166 +692,54 @@ def handle_host_response(
             "嗯，是",
             "是。",
         ]
-        return {
-            "reply": random.choice(hesitations),
-            "is_reveal": False,
-            "is_giveup": False,
-            "matched_checkpoint": "always_yes",
-        }
+        return _answer_result("是", "always_yes", display=random.choice(hesitations))
 
     # 0. 游戏流程类消息兜底：先识别"完整推理/汤底直接发在聊天框"和"问进度/缺什么"元问题。
     # 这类消息不能也不应该用"是/不是"回答，且不应消耗提问次数。
     if looks_like_reveal_attempt(user_question):
-        return {
-            "reply": format_reveal_reminder(),
-            "is_reveal": False,
-            "is_giveup": False,
-            "matched_checkpoint": "reveal_attempt_reminder",
-        }
+        return _reminder_result(format_reveal_reminder(), "reveal_attempt_reminder")
     if is_meta_progress_question(user_question):
-        return {
-            "reply": format_progress_hint(soup, history),
-            "is_reveal": False,
-            "is_giveup": False,
-            "matched_checkpoint": "progress_hint",
-        }
+        return _reminder_result(format_progress_hint(soup, history, versions=versions), "progress_hint")
 
-    # 0.5 易错点确定性兜底（命中即直接返回标答，先于是否类检测）
-    # 放在最前面：可覆盖"陈述式确认"（如"我还存在于2027年之后""然后偷完孩子回到00年成为了爷爷被杀死"）
-    # 这类玩家推理确认句没有"吗/么"等疑问标志，会被 is_yes_no_question 误判为非是否类而拦掉。
-    #
-    # 复合陈述特殊处理：玩家把多个判断揉在一句话里（有对有错），不能用一个最具体的易错点
-    # 直接截胡整体答案。此时收集所有命中的易错点：
-    # - 若多个易错点标答不一致，强制聚合为「是也不是」；
-    # - 若只命中一个易错点且标答为「不是」：说明至少有一处错、其他部分可能对，按用户规则返回「是也不是」；
-    # - 若只命中一个易错点且标答非「不是」（是/与此无关/算是）：整段围绕此确定事实，直接用易错点答案（确定性）；
-    # - 若命中 0 个：走 LLM，由 prompt 规则 14 约束「有对有错→是也不是」。
-    is_compound = is_compound_statement(user_question)
-    if is_compound:
-        cp_matches = collect_confusion_matches(soup, user_question)
-        if len(cp_matches) >= 2:
-            # 若任一命中易错点覆盖玩家整句（作者已为该句锁定确定性答案），
-            # 直接采用该易错点答案，不再做「有对有错→是也不是」的聚合。
-            # 否则多个局部易错点（含不同标答）会被强制和稀泥，把整句本应为「是」的
-            # 复合确认句误判成「是也不是」（如「偷完孩子回到00年成为爷爷被杀死 是吗」）。
-            for cp, ans in cp_matches:
-                if _cp_targets_whole_question(cp, user_question):
-                    return {
-                        "reply": ans,
-                        "is_reveal": False,
-                        "is_giveup": False,
-                        "matched_checkpoint": f"易错点整句锁定:{cp.q}",
-                    }
-            aggregated = aggregate_confusion_replies(cp_matches)
-            return {
-                "reply": aggregated,
-                "is_reveal": False,
-                "is_giveup": False,
-                "matched_checkpoint": f"复合陈述聚合({len(cp_matches)}个易错点)",
-            }
-        # 命中 1 个易错点且其标答为「不是」：说明这句话里至少有一处明确错误，
-        # 而复合陈述里通常还夹杂其他判断，按用户规则统一返回「是也不是」。
-        # 例外：若该易错点的手写问题原文（cp.q）覆盖了玩家整句，说明作者已为整句
-        # 锁定确定性答案（如旅馆"女孩的亲吻是在向我传递一种信号吗"），直接采用而非和稀泥。
-        if len(cp_matches) == 1 and cp_matches[0][1] == "不是":
-            if _cp_targets_whole_question(cp_matches[0][0], user_question):
-                return {
-                    "reply": cp_matches[0][1],
-                    "is_reveal": False,
-                    "is_giveup": False,
-                    "matched_checkpoint": f"易错点整句锁定:{cp_matches[0][0].q}",
-                }
-            return {
-                "reply": "是也不是",
-                "is_reveal": False,
-                "is_giveup": False,
-                "matched_checkpoint": f"复合陈述单点兜底({cp_matches[0][0].q})",
-            }
-        # 命中 1 个非「不是」易错点：整段陈述围绕此确定事实，直接用易错点答案（确定性，避免 LLM 偶发飘）。
-        if len(cp_matches) == 1:
-            return {
-                "reply": cp_matches[0][1],
-                "is_reveal": False,
-                "is_giveup": False,
-                "matched_checkpoint": f"复合陈述单点易错点:{cp_matches[0][0].q}",
-            }
-        # 命中 0 个易错点：继续走 LLM
-    else:
-        # 非复合陈述：保持原有单点易错点兜底逻辑，但用 effective_answer 处理否定陈述
-        cp_hit = match_confusion_point(soup, user_question)
-        if cp_hit:
-            eff_a = effective_answer_for_clause(cp_hit, user_question)
-            return {
-                "reply": eff_a,
-                "is_reveal": False,
-                "is_giveup": False,
-                "matched_checkpoint": f"易错点:{cp_hit.q}",
-            }
+    # Only complete source-bound rules can answer. Uncertain scope is normal
+    # model fallback, not malformed output or an unchargeable system error.
+    from .host_rules import decide_deterministic, question_has_static_scope
+    from .host_cache import HostCacheKey
+    from .runtime import get_runtime
+    cache = get_runtime().deterministic_host_cache
+    key = HostCacheKey(soup.id, versions.puzzleVersion, versions.ruleVersion, versions.engineVersion,
+                       versions.normalizationVersion, question_key)
+    exact_rule = next((rule for rule in rule_snapshot.exactRules if rule.canonicalQuestionKey == question_key), None) \
+        if rule_snapshot is not None else None
+    if exact_rule is not None:
+        from .baselines import digest
+        marker = "rule1:" + digest(exact_rule.model_dump(mode="json"))
+        hit = cache.get(key)
+        # Even an old internal caller using r1 without its overlay cannot seed
+        # an original-rule answer that overrides the subsequently loaded patch.
+        if (hit is not None and hit.matchedCheckpoint == marker and hit.answer == exact_rule.answer
+            and hit.evidenceIds == exact_rule.factIds):
+            return hit
+        result = HostResult(kind="answer", answer=exact_rule.answer, reply=exact_rule.answer,
+            chargeable=True, source="deterministic", versions=versions, evidenceIds=exact_rule.factIds,
+            matchedCheckpoint=marker, contextIndependent=True)
+        cache.put(key, result)
+        return result
+    hit = cache.get(key) if question_has_static_scope(soup, user_question) else None
+    if hit is not None:
+        return hit
+    decision = decide_deterministic(soup, user_question, history, versions=versions)
+    if decision is not None:
+        result = HostResult(kind="answer", answer=decision.answer, chargeable=True,
+                            source="deterministic", reply=decision.answer, versions=versions,
+                            evidenceIds=decision.evidenceIds, matchedCheckpoint=decision.ruleId,
+                            contextIndependent=decision.contextIndependent)
+        cache.put(key, result)
+        return result
 
-    # 0.4 本格/变格 类型问题确定性兜底（通用规则，2026-08-23 新增）
-    # 放在易错点/复合判定之后：具体汤的易错点（如"除了巫术还有其他变格元素吗"）优先，
-    # 未被易错点覆盖的通用类型问题（"这是本格吗/这是变格吗/有变格元素吗"）由 genre 字段确定性作答。
-    genre_ans = match_genre_answer(soup, user_question)
-    if genre_ans is not None:
-        return {
-            "reply": genre_ans,
-            "is_reveal": False,
-            "is_giveup": False,
-            "matched_checkpoint": f"类型判定(genre={getattr(soup, 'genre', '')})",
-        }
-
-    # 0.4a 变格元素问法兜底（2026-09-01 新增）：genre=变格 时，玩家问"有穿越/灵异/魔法等元素吗"
-    # 确定性答"是"，"没有X吗"答"不是"。补 match_genre_answer 只匹配"本格/变格"标志词之不足。
-    # 放在 cast_count 之前、是否类检测之前：玩家必看得到确定性答案，避免 LLM 免费模型瞎猜。
-    super_ans = match_supernatural_answer(soup, user_question)
-    if super_ans is not None:
-        return {
-            "reply": super_ans,
-            "is_reveal": False,
-            "is_giveup": False,
-            "matched_checkpoint": f"变格元素判定(genre=变格)",
-        }
-
-    # 0.4b 人数问题确定性兜底（通用规则，2026-08-24 新增）
-    # 放在 genre 规则之后、是否类检测之前：玩家问"只有xx人吗"按 soup.castCount 确定性作答，
-    # 不依赖 LLM，避免把村民/围观群众等泛指群体数进去。castCount 为 None 的汤不触发。
-    cast_ans = match_cast_count(soup, user_question)
-    if cast_ans is not None:
-        return {
-            "reply": cast_ans,
-            "is_reveal": False,
-            "is_giveup": False,
-            "matched_checkpoint": f"人数判定(castCount={getattr(soup, 'castCount', None)})",
-        }
-
-    # 0. 是否类检测（覆盖所有路径）
     if not is_yes_no_question(user_question):
-        return {
-            "reply": format_yes_no_reminder(user_question),
-            "is_reveal": False,
-            "is_giveup": False,
-            "matched_checkpoint": None,
-        }
-
-    # 1. RAG 语义匹配。复合陈述跳过 RAG（避免只命中一个 checkpoint 就给出片面答案）；
-    # 关系型问题跳过（象征/因果需要语义理解）。
-    # 身份归属类问题（"我是人吗""哥哥是自杀吗"）也允许先试 RAG：checkpoints.aliases
-    # 是作者按玩家问法人工标注的，命中即用。此前 identity 问题被整体跳过 RAG 走 LLM，
-    # 免费模型对这类简单身份问题反而答不准（实测"我是人吗"答成"不是"、哥哥的指令 4 题全错）。
-    if not is_compound and not is_relational_question(user_question):
-        match = rag.match_user_query(user_question, soup)
-        if match.match and match.checkpoint:
-            reply = generate_reply_from_checkpoint(match.checkpoint)
-            return {
-                "reply": reply,
-                "is_reveal": False,
-                "is_giveup": False,
-                "matched_checkpoint": match.checkpoint.key,
-            }
-
-    # 2. 没有精确匹配 或 是关系型问题 / 复合陈述 → LangChain 调 LLM 判断
-    # 系统 prompt 规则 14 已明确要求：复合陈述有对有错时回答「是也不是」。
-    # （单点易错点的复合句已在上方确定性处理，此处仅服务 0 命中复合句 / 关系型 / 身份类问题）
+        return _reminder_result(format_yes_no_reminder(user_question))
+    is_compound = is_compound_statement(user_question)
     extra = None
     if is_compound:
         extra = (
@@ -1031,255 +748,72 @@ def handle_host_response(
             "你必须整体回答「是也不是」，禁止只抓住一个错误点就整体回答「不是」，"
             "也禁止因为'基本正确'就整体回答「是」。】"
         )
-    llm_reply = call_llm(soup, history, user_question, extra_instruction=extra)
-    return {**llm_reply, "matched_checkpoint": None}
+    llm_reply = call_llm(soup, history, user_question, extra_instruction=extra, versions=versions)
+    return llm_reply
 
 
 # ===================== LangChain LLM 判定 =====================
-def call_llm(soup: Soup, history: List[dict], user_question: str, extra_instruction: Optional[str] = None, fallback_answer: Optional[str] = None) -> dict:
-    try:
-        # 关键改造：发送【完整汤底】而非 bottomSummary。
-        # 摘要会丢失"妈妈发疯是因为生下丈夫"这类关键因果链，导致 LLM 误判；
-        # 完整汤底每局约几千 token，本地 Ollama 0 成本、云端也极便宜，却能根治"看不懂汤底"。
-        truth_text = soup.bottom
-        confusion_text = build_confusion_text(soup)
-        symbol_text = build_symbol_text(soup)
-        truth_items_text = build_truth_text(soup)
-        recent_history = history[-10:] if history else []
+def call_llm(soup: Soup, history: List[dict], user_question: str, extra_instruction: Optional[str] = None,
+             fallback_answer: Optional[str] = None, *, versions: HostVersions | None = None) -> HostResult:
+    """Validate output explicitly; never turn a failure into an irrelevant fact.
 
-        llm = _get_llm(max_tokens=600)
-        parser = JsonOutputParser(pydantic_object=HostJudgment)
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", HOST_SYSTEM_PROMPT),
-            ("human", "{input_text}\n\n{format_instructions}"),
-        ]).partial(format_instructions=parser.get_format_instructions())
-        chain = prompt | llm | parser
-
-        history_text = "\n".join(
-            f"{'玩家' if (m.get('role', 'user') if isinstance(m, dict) else getattr(m, 'role', 'user')) == 'user' else '主持人'}："
-            f"{m.get('content', '') if isinstance(m, dict) else getattr(m, 'content', '')}"
-            for m in recent_history
-        )
-
-        user_content = (
-            f"[当前汤的汤面]{soup.surface}\n\n"
-            f"[完整汤底真相（绝对不能透露给玩家）]\n{truth_text}\n\n"
-            f"[汤底关键意象与真实含义（必须区分字面物品与象征含义）]\n{symbol_text}\n\n"
-            f'[汤底关键事实清单（回答身份归属/"X 是 Y 吗"类问题时，必须先在此定位 X 的真实身份）]\n{truth_items_text}\n\n'
-            f"[已知易错点（遇到这些问题必须严格按给定答案回复）]\n{confusion_text}\n\n"
-            f"[最近问答记录]\n{history_text if history_text else '（无）'}\n\n"
-            f"{extra_instruction + chr(10) + chr(10) if extra_instruction else ''}"
-            f"[玩家的提问]{user_question}\n\n"
-            "请先依据[完整汤底真相]在心里列出与提问相关的事实（内部推理，不得透露给玩家），"
-            "再严格只从 是/不是/是也不是/算是/与此无关 中选一个作为最终判定。"
-        )
-
-        try:
-            result = chain.invoke({"input_text": user_content})
-        except Exception as e:  # noqa: BLE001
-            print("⚠️ HostJudgment 结构化解析失败，降级文本归一化:", e)
-            messages = [SystemMessage(content=HOST_SYSTEM_PROMPT), HumanMessage(content=user_content)]
-            raw = llm.invoke(messages)
-            text = raw.content if hasattr(raw, "content") else str(raw)
-            norm = _normalize_reply(text)
-            if fallback_answer and norm not in ("是", "不是", "是也不是", "算是", "与此无关"):
-                return {"reply": fallback_answer, "is_reveal": False, "is_giveup": False}
-            return {"reply": norm, "is_reveal": False, "is_giveup": False}
-
-        if hasattr(result, "model_dump"):
-            result = result.model_dump()
-        # 兜底：parser 偶尔返回非 dict（如 str），直接归一化文本或降级易错点答案
-        if not isinstance(result, dict):
-            norm = _normalize_reply(str(result))
-            if fallback_answer and norm not in ("是", "不是", "是也不是", "算是", "与此无关"):
-                return {"reply": fallback_answer, "is_reveal": False, "is_giveup": False}
-            return {"reply": norm, "is_reveal": False, "is_giveup": False}
-        answer = result.get("answer") or ""
-        reply = _normalize_reply(answer)
-        return {"reply": reply, "is_reveal": False, "is_giveup": False}
-    except Exception as e:  # noqa: BLE001
-        msg = str(e)
-        if config.LLM_PROVIDER == "ollama":
-            # 本地模式连不上，通常是 Ollama 未启动或没拉模型，给出可操作提示
-            print("❌ 本地 Ollama 调用失败（请确认 Ollama 已启动且已拉取模型）:", e)
-            return {
-                "reply": "🤖 无法连接本地 Ollama，请先启动 Ollama 并拉取模型（ollama run qwen2.5:7b）。",
-                "is_reveal": False,
-                "is_giveup": False,
-            }
-        # 明确区分"额度耗尽/限流/服务异常"与"一般性失败"，便于自诊断（避免误以为是代码 bug）。
-        # 注意：玩家看不到内部细节——免费模型（如 SiliconFlow Qwen2.5-7B-Instruct）虽 0 元，
-        # 但有 RPM/QPS 限速，超限会 502/429，此时给玩家友好提示即可，具体原因只打日志。
-        if "Free quota" in msg or "AllocationQuota" in msg or "403" in msg:
-            print("❌ LLM 调用失败（API 额度/权限问题）:", e)
-            return {
-                "reply": "🤖 主持人暂时走神了，请重新发送你的问题（不会扣除提问次数）~",
-                "is_reveal": False,
-                "is_giveup": False,
-            }
-        if fallback_answer:
-            print("❌ LLM 调用失败，降级使用易错点答案:", e)
-            return {"reply": fallback_answer, "is_reveal": False, "is_giveup": False}
-        print("❌ LLM 调用失败:", e)
-        return {"reply": "🤖 主持人思考失败，请重新发送你的问题（不会扣除提问次数）~", "is_reveal": False, "is_giveup": False}
-
-
-# ===================== LangChain 复盘评估 =====================
-def _clamp(n) -> int:
-    try:
-        n = int(n)
-    except Exception:
-        return 0
-    return max(0, min(100, n))
-
-
-def _parse_qa_pairs(qa_text: str):
-    """把 '玩家：问题\\n主持人：回答' 文本解析成 [(question, answer), ...]。"""
-    pairs = []
-    cur_q = None
-    for line in qa_text.split("\n"):
-        line = line.strip()
-        if line.startswith("玩家") and ("：" in line or ":" in line):
-            sep = "：" if "：" in line else ":"
-            cur_q = line.split(sep, 1)[1].strip()
-        elif line.startswith("主持人") and ("：" in line or ":" in line) and cur_q:
-            sep = "：" if "：" in line else ":"
-            ans = line.split(sep, 1)[1].strip()
-            pairs.append((cur_q, ans))
-            cur_q = None
-    return pairs
-
-
-def _ans_matches(ans: str, expected: bool) -> bool:
-    """判断主持人回答是否与 checkpoint 期望一致（True=应为'是'，False=应为'不是'）。"""
-    a = (ans or "").strip()
-    if not a:
-        return False
-    is_neg = a.startswith("不是") or a == "否" or a.startswith("否")
-    is_pos = (a.startswith("是") and "不是也" not in a) or any(
-        k in a for k in ("算是", "对", "没错", "正确", "是的")
-    )
-    if expected is True:
-        return is_pos
-    # expected is False / 'unknown'：只要给出了明确否定或任意答复即算触及
-    return is_neg or is_pos or len(a) > 0
-
-
-def _checkpoint_keywords(cp: Checkpoint) -> list[str]:
-    """返回 checkpoint 用于匹配的关键字列表（key + aliases，去空）。"""
-    key = cp.key or ""
-    aliases = cp.aliases or []
-    return [k for k in [key] + list(aliases) if k]
-
-
-def _checkpoint_hit_by_text(cp: Checkpoint, text: str) -> bool:
-    """判断一段文本（如玩家最终推理/汤底直发）是否覆盖某个 checkpoint 的关键信息。"""
-    if not text:
-        return False
-    tl = text.lower()
-    return any(kw.lower() in tl for kw in _checkpoint_keywords(cp))
-
-
-def evaluate_completion(soup: Soup, qa_text: str, messages: Optional[List[dict]] = None) -> dict:
-    """根据本局问答记录与预设 checkpoints 规则化计算还原完成度。
-
-    不调用 LLM（本地小模型无法稳定输出结构化 JSON，且每次白等数秒）。
-    直接判断每个 checkpoint 是否被玩家问及并得到与真相一致的答复，
-    100% 确定、瞬间返回、与主持人判定逻辑同源。
-
-    额外支持：如果玩家把完整推理/汤底直接发在聊天框（被识别为 reveal_attempt 并保存），
-    也会用该文本匹配 checkpoints，避免"明明答对了却 0%"的情况。
+    fallback_answer is retained only for the old call signature and is not used
+    to disguise an unavailable or malformed provider result.
     """
-    checkpoints = [cp for cp in (soup.checkpoints or [])]
+    from .host_context import ContextLimitError, build_puzzle_context
+    from .model_gateway import ModelFailure
+    from .runtime import get_runtime
+    from .request_lifecycle import cancellation_signal
+    deadline = time.monotonic() + 45
+    try:
+        format_rule = ('\n只输出 JSON 对象，answer 只能为是、不是、是也不是、算是、与此无关；'
+                       'reasoning 为不超过100字的短依据，不要输出其他字段或Markdown。')
+        context = build_puzzle_context(soup=soup, system_prompt=HOST_SYSTEM_PROMPT + format_rule,
+                                      question=user_question, history=history or [], extra_instruction=extra_instruction or "",
+                                      puzzle_version=(versions.puzzleVersion if versions is not None
+                                                      and versions.puzzleVersion != "unversioned" else None))
+        judgment = get_runtime().get_model_gateway().invoke([
+            {"role": "system", "content": context.system}, {"role": "user", "content": context.user},
+        ], deadline=deadline, cancelled=cancellation_signal())
+        return HostResult(kind="answer", answer=judgment.answer, chargeable=True,
+                          source="llm", reply=judgment.answer)
+    except ContextLimitError:
+        code = "context_too_large"
+    except ModelFailure as error:
+        code = error.code
+    return HostResult(kind="system_error", chargeable=False, source="llm", errorCode=code,
+                      reply="🤖 主持人暂时无法给出可靠回答，请稍后重试，本次不扣提问次数。")
 
-    # 隐藏彩蛋汤的通关：命中 win_condition 即 100% 通关（即使没有 checkpoints）。
-    win_msg = check_win_condition(soup, qa_text)
-    if win_msg:
-        return {
-            "completion": 100,
-            "evaluation": "🎉 你已看穿隐藏彩蛋的终极真相，达成通关！完整汤底如下，请对照回顾。",
-            "keyPointsCovered": ["通关条件已满足"],
-            "keyPointsMissing": [],
-        }
 
-    if not checkpoints:
-        return {
-            "completion": 0,
-            "evaluation": "本局暂无预设复盘要点，但完整汤底如下，请对照回顾。",
-            "keyPointsCovered": [],
-            "keyPointsMissing": [],
-        }
+# ===================== 无模型调用的类型化复盘评估 =====================
+def evaluate_completion(soup: Soup, qa_text: str, messages: Optional[List[dict]] = None, *,
+                        turns=None, versions: HostVersions | None = None, excluded_legacy_count: int = 0) -> dict:
+    """Typed authoritative scorer, or explicitly unverified legacy adapter.
 
-    pairs = _parse_qa_pairs(qa_text)
-
-    # 收集玩家发在聊天框里的"完整推理/汤底"类消息，用于最终覆盖度兜底
-    reveal_texts: list[str] = []
-    if messages:
-        for m in messages:
-            if m.get("role") == "user":
-                content = m.get("content", "")
-                if looks_like_reveal_attempt(content):
-                    reveal_texts.append(content)
-
-    covered, missing = [], []
-    for cp in checkpoints:
-        expected = cp.answer != "unknown" and cp.answer  # True/False 期望；unknown 视为任意
-        hit = False
-        # 1. 正常问答匹配
-        for q, a in pairs:
-            ql = q.lower()
-            if any(kw.lower() in ql for kw in _checkpoint_keywords(cp)):
-                # answer 为 'unknown' 时只要问及即算触及；否则需答复与期望一致
-                if cp.answer == "unknown" or _ans_matches(a, bool(cp.answer)):
-                    hit = True
-                    break
-        # 2. 完整推理/汤底直发兜底
-        if not hit and reveal_texts:
-            # 对于期望为 True 的 checkpoint，直接看关键词是否出现在玩家推理中；
-            # 对于期望为 False 或 unknown 的， keyword 命中本身也说明玩家讨论到了该点，
-            # 保守起见仍按"触及"处理（玩家能写出相关内容即视为知道）。
-            if any(_checkpoint_hit_by_text(cp, t) for t in reveal_texts):
-                hit = True
-        if hit:
-            covered.append(cp.key or "")
-        else:
-            missing.append(cp.key or "")
-
-    total = len(checkpoints)
-    cov = len(covered)
-    completion = round(cov / total * 100) if total else 0
-
-    if completion == 100:
-        eval_text = f"完美！你还原了全部 {total} 个核心真相，完成度 100%。"
-    elif completion >= 60:
-        miss_preview = "、".join(missing[:3])
-        tail = " 等" if len(missing) > 3 else ""
-        eval_text = (
-            f"不错！你还原了 {cov}/{total} 个核心真相（完成度 {completion}%）。"
-            f"还有 {len(missing)} 个关键点没触及：{miss_preview}{tail}。"
-        )
-    else:
-        miss_preview = "、".join(missing[:5])
-        eval_text = (
-            f"你还原了 {cov}/{total} 个核心真相（完成度 {completion}%）。"
-            f"关键遗漏：{miss_preview}。"
-        )
-
-    # 特殊评分映射：用于解锁彩蛋汤（如《织梦者》→《新世界》）。
-    # 规则：真实还原度 < 50% 时显示真实分；>= 50% 时直接显示 70%（解锁门槛），
-    # 真实越高显示也越高（线性），封顶 100%。保证玩家"答得差不多"就能亮彩蛋。
-    raw_completion = completion
-    display_completion = completion
-    if soup.special_scoring:
-        if completion >= 50:
-            display_completion = min(100, max(70, round(completion * 1.2)))
-        # else 保持真实分
-
-    return {
-        "completion": display_completion,
-        "rawCompletion": raw_completion,
-        "unlockThresholdReached": display_completion >= 70,
-        "evaluation": eval_text,
-        "keyPointsCovered": covered,
-        "keyPointsMissing": missing,
-    }
+    Display/player plaintext never creates a factual answer, turn or win.
+    Neither coverage nor narrative unlock progress is reconstruction quality.
+    """
+    from .scoring import score_confirmed_coverage
+    if turns is None:
+        return {"completion": 0, "verifiedCoverage": None, "reconstructionScore": None,
+                "scoreVersion": None, "plotProgress": None, "unknownTopics": [],
+                "unlockThresholdReached": False, "keyPointsCovered": [], "keyPointsMissing": [],
+                "evaluation": "这份文字记录没有可核验的主持人判定，不能据此确认事实覆盖；还原程度尚未独立评估。"}
+    if versions is None:
+        raise ValueError("Typed evaluation requires its pinned versions")
+    scored = score_confirmed_coverage(soup, turns, versions=versions, excluded_legacy_count=excluded_legacy_count)
+    total = len(scored.keyPointsCovered) + len(scored.keyPointsMissing)
+    evaluation = (f"已确认事实覆盖 {scored.verifiedCoverage}%（{len(scored.keyPointsCovered)}/{total} 个已知计分要点）。"
+                  if total else "没有可确认的计分要点，事实覆盖记为 0%。")
+    evaluation += "这不代表你已还原故事，还原程度尚未独立评估；完整汤底供你对照回顾。"
+    if scored.excludedLegacyCount:
+        evaluation += f" 有 {scored.excludedLegacyCount} 条旧问答没有可核验判定，历史已保留但未计分。"
+    if scored.unknownTopics:
+        evaluation += f" 另有 {len(scored.unknownTopics)} 个未知要点，不纳入已知事实分母。"
+    if scored.plotProgress is not None:
+        evaluation += f" 剧情进度 {scored.plotProgress}%（非还原评分）。"
+    return {"completion": scored.verifiedCoverage, "verifiedCoverage": scored.verifiedCoverage,
+            "reconstructionScore": None, "scoreVersion": scored.scoreVersion, "plotProgress": scored.plotProgress,
+            "unknownTopics": list(scored.unknownTopics), "keyPointsCovered": list(scored.keyPointsCovered),
+            "keyPointsMissing": list(scored.keyPointsMissing), "unlockThresholdReached": scored.unlockThresholdReached,
+            "evaluation": evaluation}

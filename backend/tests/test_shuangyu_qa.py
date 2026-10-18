@@ -61,6 +61,7 @@ QA = [
 ]
 
 
+@pytest.mark.real_model
 def test_shuangyu_full_qa(client):
     hard, soft = run_qa(client, SOUP_ID, QA)
     assert not hard, f"硬错误 {len(hard)} 个: {hard[:5]}"

@@ -20,6 +20,13 @@ venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+.cache/
+.venv-ts01/
+*.egg-info/
+.coverage*
+htmlcov/
+test-results/
+playwright-report/
 
 # testing
 /coverage
@@ -61,6 +68,7 @@ next-env.d.ts
 
 # 运行时数据与真实玩家反馈（含会话库、反馈文本，不入库）
 /backend/data/sessions.db
+/backend/data/sessions.db-*
 /backend/data/sessions.json.bak
 /backend/data/feedback.jsonl
 /backend/data/soup_sources.json
@@ -115,3 +123,6 @@ next-env.d.ts
 !/backend/data/eval/qa_pairs/
 !/backend/data/eval/qa_pairs/*
 /backend/data/eval/qa_pairs_auto/
+
+# 独立holdout草案/原文/标签/审核/冻结材料默认私有；公开演示另行授权
+/backend/eval/private/

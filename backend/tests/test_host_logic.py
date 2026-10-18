@@ -36,6 +36,7 @@ def _soup(soup_id: str) -> Soup:
     ("我还有什么没答完的吗", False),  # 开放式疑问词优先于"吗"（历史 bug 回归）
     ("请告诉我答案", False),        # 指令类
     ("介绍一下这个故事的背景", False),
+    ("我还存在于2027年之后", True),
     ("所以主角是被妻子催眠的，被困在梦里了", True),  # "所以"总结=请求确认
 ])
 def test_is_yes_no_question(q: str, expected: bool):
@@ -45,9 +46,13 @@ def test_is_yes_no_question(q: str, expected: bool):
 # ===================== 复合陈述 =====================
 @pytest.mark.parametrize("q,expected", [
     ("主角被妻子催眠、小珊是主角的情人、妻子是催眠师、星期一/星期二是梦境", True),
+    ("甲是医生，乙是老师，丙是警察吗", True),
     ("我 爸妈 妻子", False),              # 单个空格列表不算复合
     ("妻子是催眠师吗", False),
     ("幽灵是真的幽灵吗", False),
+    ("那么他看到的大堂，是现实中正在营业的大厅吗", False),
+    ("大叔的几次击打，在现实里可能是救命动作而不是故意殴打吗", False),
+    ("如果主角没有真正清醒，仍可能在意识中体验到旅馆大堂吗", False),
 ])
 def test_is_compound_statement(q: str, expected: bool):
     assert is_compound_statement(q) is expected
@@ -111,17 +116,18 @@ def test_meta_progress_question():
 
 # ===================== 完成度计算（纯规则，无 LLM） =====================
 def test_evaluate_completion_paste_bottom_summary():
-    """玩家把完整汤底贴进聊天框 → 完成度应接近 100%（贴官方汤底 91%+）。"""
+    """贴出的官方汤底仍是玩家文字，不能伪造可核验主持人判定。"""
     soup = _soup("shuangyu-yupei")
     summary = soup.bottomSummary or ""
     msgs = [{"role": "user", "content": summary}, {"role": "host", "content": "请点揭晓答案"}]
     qa = "玩家：" + summary + "\n主持人：请点揭晓答案"
     ev = evaluate_completion(soup, qa, messages=msgs)
-    assert ev["completion"] >= 90, f"贴汤底完成度应≥90%，实际 {ev['completion']}%"
+    assert ev["completion"] == 0
+    assert ev["verifiedCoverage"] is None and ev["reconstructionScore"] is None
 
 
 def test_evaluate_completion_partial():
-    """只问几个点 → 完成度在 0-100 之间且不虚高。"""
+    """未经核验的纯文字历史不能推测事实分；保留原部分答案场景。"""
     soup = _soup("shuangyu-yupei")
     qa = "\n".join([
         "玩家：故事里是不是有复制人",
@@ -132,7 +138,7 @@ def test_evaluate_completion_partial():
         "主持人：是",
     ])
     ev = evaluate_completion(soup, qa, messages=[])
-    assert 0 < ev["completion"] < 100
+    assert ev["completion"] == 0 and ev["scoreVersion"] is None
 
 
 def test_evaluate_completion_empty():

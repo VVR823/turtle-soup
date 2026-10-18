@@ -1,0 +1,28 @@
+# TEMPLATE ONLY: operator must verify user, private env/data and release paths before enabling.
+# TS-17 owns maintenance/backup/migration/TLS/live topology/recovery gates.
+[Unit]
+Description=Turtle Soup isolated single-process API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=turtle-soup
+Group=turtle-soup
+WorkingDirectory=/opt/turtle-soup/current
+EnvironmentFile=/etc/turtle-soup/backend.env
+Environment=API_WORKER_COUNT=1
+Environment=ENABLE_AGENT=0
+Environment=TURTLE_SOUP_DATA_DIR=/var/lib/turtle-soup
+ExecStart=/opt/turtle-soup/current/backend/venv/bin/python /opt/turtle-soup/current/scripts/run-backend.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/turtle-soup
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

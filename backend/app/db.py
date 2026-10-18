@@ -5,30 +5,37 @@ session 问答记录持久化到 backend/data/sessions.db（SQLite）。
 
 为什么用 SQLite 而不是 JSON 文件：
 - JSON 存储每次读写都是"全量读 → 改 → 全量写"，并发请求会互相覆盖丢数据；
-- SQLite 天然支持事务与行级写锁，单进程多请求下安全，且是 Python 标准库，零依赖。
+- SQLite 提供事务、单写者锁与 WAL 读写协调，不是行级写锁。
 """
 import json
 import os
 import sqlite3
 import time
 import uuid
+import shutil
+from contextlib import contextmanager
+from tempfile import TemporaryDirectory
 from pathlib import Path
 
 from .schemas import ConfusionPoint, Soup
 from .soups import SEED_SOUPS
+from .runtime import get_runtime
+from . import baselines, migrations, game_responses
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BACKEND_DIR / "data"
-DB_FILE = DATA_DIR / "sessions.db"
-# 旧版 JSON 存储（首次启动自动迁移进 SQLite 后改名为 .bak）
-LEGACY_SESSIONS_FILE = DATA_DIR / "sessions.json"
-# 自动抽取脚本（preprocess_soup.py）生成的汤品，收录新汤无需改代码
-GENERATED_FILE = DATA_DIR / "generated_soups.json"
-VERIFIED_QA_FILE = DATA_DIR / "verified_qa_pairs.jsonl"
+
+class DataLoadError(RuntimeError):
+    """Configured local data is malformed; never treat this as an empty catalog."""
+
+
+class SessionCompatibilityError(RuntimeError):
+    pass
+
+def _data_path(name: str) -> Path:
+    return get_runtime().settings.DATA_DIR / name
 
 
 def ensure_dir() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    get_runtime().settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def read_json(path: str):
@@ -36,10 +43,9 @@ def read_json(path: str):
         return []
     try:
         with open(path, encoding="utf-8") as f:
-            raw = f.read().strip()
-            return json.loads(raw) if raw else []
-    except Exception:
-        return []
+            return baselines.strict_json(f.read())
+    except (OSError, ValueError, UnicodeError) as error:
+        raise DataLoadError("Configured JSON data is unreadable or malformed") from error
 
 
 def write_json(path: str, data) -> None:
@@ -49,136 +55,63 @@ def write_json(path: str, data) -> None:
 
 
 # ===================== SQLite =====================
-def _connect() -> sqlite3.Connection:
+def _connect(*, timeout: float = 10) -> sqlite3.Connection:
     ensure_dir()
-    conn = sqlite3.connect(DB_FILE, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")  # 读写并发友好（单实例足够）
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-
-def _init_db() -> None:
-    conn = _connect()
+    conn = sqlite3.connect(_data_path("sessions.db"), timeout=timeout)
     try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                soup_id TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'playing',
-                questions_asked INTEGER NOT NULL DEFAULT 0,
-                question_limit INTEGER,
-                created_at REAL NOT NULL,
-                solved_at REAL,
-                given_up_at REAL
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                timestamp REAL NOT NULL,
-                is_free_reminder INTEGER NOT NULL DEFAULT 0,
-                FOREIGN KEY (session_id) REFERENCES sessions(id)
-            )
-            """
-        )
-        conn.commit()
-    finally:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")  # 读写并发友好（单实例足够）
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+    except BaseException:
         conn.close()
-
-
-def _migrate_legacy_sessions() -> None:
-    """把旧版 sessions.json 一次性迁移进 SQLite（幂等：迁移成功即改名 .bak，靠文件名保证不重复执行）。
-
-    注意：不能以"sessions.db 是否存在"作为跳过条件——_init_db 会先创建 db 文件，
-    那样旧 JSON 永远不会被迁移。判断依据是旧 json 是否还在。
-    """
-    if not os.path.exists(LEGACY_SESSIONS_FILE):
-        return
-    data = read_json(LEGACY_SESSIONS_FILE)
-    if not data:
-        os.rename(LEGACY_SESSIONS_FILE, LEGACY_SESSIONS_FILE.with_suffix(".json.bak"))
-        return
-    conn = _connect()
-    try:
-        with conn:
-            for s in data:
-                conn.execute(
-                    "INSERT OR IGNORE INTO sessions (id, soup_id, status, questions_asked, question_limit, created_at, solved_at, given_up_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        s.get("id"),
-                        s.get("soupId", ""),
-                        s.get("status", "playing"),
-                        s.get("questionsAsked", 0),
-                        s.get("questionLimit"),
-                        s.get("createdAt", s.get("created_at", time.time())),
-                        s.get("solvedAt"),
-                        s.get("givenUpAt"),
-                    ),
-                )
-                for m in s.get("messages", []):
-                    conn.execute(
-                        "INSERT INTO messages (session_id, role, content, timestamp, is_free_reminder) "
-                        "VALUES (?, ?, ?, ?, ?)",
-                        (
-                            s.get("id"),
-                            m.get("role", "user"),
-                            m.get("content", ""),
-                            m.get("timestamp", time.time()),
-                            1 if m.get("isFreeReminder") else 0,
-                        ),
-                    )
-        os.rename(LEGACY_SESSIONS_FILE, LEGACY_SESSIONS_FILE.with_suffix(".json.bak"))
-        print(f"✅ 已迁移旧 sessions.json（{len(data)} 个会话）到 SQLite")
-    finally:
-        conn.close()
+        raise
 
 
 # ===================== 题库（启动时加载） =====================
-def _load_generated_soups() -> list[Soup]:
+def _load_generated_soups(path: Path | None = None) -> list[Soup]:
     """加载 preprocess_soup.py 自动生成的汤品（收录新汤的入口）。"""
     out = []
-    for s in read_json(GENERATED_FILE):
+    records = read_json(path if path is not None else _data_path("generated_soups.json"))
+    if not isinstance(records, list):
+        raise DataLoadError("Configured puzzle catalog must be a JSON array")
+    for s in records:
         try:
             out.append(Soup(**s))
-        except Exception as e:  # noqa: BLE001
-            print("⚠️ 跳过无法解析的生成汤品:", e)
+        except (ValueError, TypeError) as error:
+            raise DataLoadError("Configured puzzle catalog contains an invalid record") from error
     return out
 
 
-def _load_verified_qa_pairs(soups: list[Soup]) -> None:
-    """把管理员审批通过的反馈 QA 对注入到对应汤的 confusionPoints 末尾。
+def _load_verified_qa_pairs(soups: list[Soup], path: Path | None = None) -> None:
+    """Preserve old input semantics ONLY during explicit isolated rehearsal.
 
-    每晚 0 点 merge_verified_qa.py 生成 data/verified_qa_pairs.jsonl；
-    后端启动时读入，让主持人无需重启即可继承已验证的正确答案。
+    Runtime never calls this loader. A historic approved label is not new
+    publication authority, and no source file is removed or rewritten here.
     """
-    if not os.path.exists(VERIFIED_QA_FILE):
+    verified_file = path if path is not None else _data_path("verified_qa_pairs.jsonl")
+    if not os.path.exists(verified_file):
         return
     soup_map = {s.id: s for s in soups}
     injected = 0
-    with open(VERIFIED_QA_FILE, "r", encoding="utf-8") as f:
+    with open(verified_file, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                pair = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+                pair = baselines.strict_json(line)
+                if not isinstance(pair, dict):
+                    raise ValueError("not an object")
+            except ValueError as error:
+                raise DataLoadError("Configured verified rules contain malformed JSON") from error
             soup_id = pair.get("soupId")
             cp_raw = pair.get("confusionPoint")
             if not soup_id or not cp_raw:
-                continue
+                raise DataLoadError("Configured verified rule is missing required fields")
             soup = soup_map.get(soup_id)
             if not soup:
-                continue
+                raise DataLoadError("Configured verified rule refers to an unknown puzzle")
             try:
                 cp = ConfusionPoint(**cp_raw)
                 if soup.confusionPoints is None:
@@ -188,42 +121,115 @@ def _load_verified_qa_pairs(soups: list[Soup]) -> None:
                 if cp.q not in existing_qs:
                     soup.confusionPoints.append(cp)
                     injected += 1
-            except Exception as e:  # noqa: BLE001
-                print(f"⚠️ 跳过无法解析的 verified QA 对（soup={soup_id}）:", e)
-    if injected:
-        print(f"✅ 已注入 {injected} 条玩家验证的正确 QA 对到 confusionPoints")
+            except (ValueError, TypeError) as error:
+                raise DataLoadError("Configured verified rule is invalid") from error
 
 
-# 启动时合并：内置手写题库 SEED_SOUPS + 自动抽取生成的 generated_soups.json
-SOUPS: list[Soup] = [Soup(**s) for s in SEED_SOUPS] + _load_generated_soups()
+def load_catalog(data_dir: Path, *, include_runtime: bool = True, include_legacy_verified: bool = True) -> list[Soup]:
+    """Explicit input directory; usable by the rehearsal CLI without dotenv."""
+    soups = [Soup(**s) for s in SEED_SOUPS]
+    if include_runtime:
+        soups.extend(_load_generated_soups(data_dir / "generated_soups.json"))
+        if include_legacy_verified:
+            _load_verified_qa_pairs(soups, data_dir / "verified_qa_pairs.jsonl")
+    if len({s.id for s in soups}) != len(soups):
+        raise DataLoadError("Puzzle catalog has duplicate IDs")
+    return soups
 
-# 再把审批通过的反馈 QA 对注入进去
-_load_verified_qa_pairs(SOUPS)
 
-# 初始化数据库 + 旧数据迁移（首次启动自动执行）
-_init_db()
-_migrate_legacy_sessions()
+def get_soups() -> list[Soup]:
+    runtime = get_runtime()
+    with runtime.lock:
+        if runtime.soups is None:
+            runtime.soups = load_catalog(runtime.settings.DATA_DIR, include_runtime=runtime.settings.LOAD_RUNTIME_PUZZLES,
+                include_legacy_verified=False)
+        return runtime.soups
+
+
+@contextmanager
+def _readonly_preflight(path: Path):
+    """SQLite mode=ro may write SHM. Verify a private DB+WAL copy, never source.
+
+    This is a cold-start schema check, not a live backup or multiworker snapshot
+    guarantee. Refuse if files change during copying; migrations stay offline.
+    """
+    sources = (path, path.with_name(path.name + "-wal"))
+
+    def fingerprint():
+        return tuple((p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ino) if p.exists() else None for p in sources)
+
+    with TemporaryDirectory(prefix="turtle-soup-preflight-") as directory:
+        before = fingerprint()
+        for source, state in zip(sources, before):
+            if state is not None:
+                shutil.copy2(source, Path(directory) / source.name)
+        if fingerprint() != before:
+            raise migrations.MigrationError("Storage changed during startup preflight; retry after writers stop")
+        conn = sqlite3.connect((Path(directory) / path.name).as_uri() + "?mode=ro", uri=True)
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+
+def initialize() -> None:
+    """Initialize fresh storage or verify a migrated DB; never upgrade an old DB."""
+    runtime = get_runtime()
+    with runtime.lock:
+        if runtime.initialized:
+            return
+        path = _data_path("sessions.db")
+        if not path.exists() and any(_data_path(name).exists() for name in ("feedback.jsonl", "verified_qa_pairs.jsonl")):
+            raise migrations.MigrationRequired("Legacy feedback/rules require explicit isolated rehearsal")
+        catalog = get_soups()
+        if path.exists():
+            # Read-only preflight precedes WAL setup or any application writes.
+            with _readonly_preflight(path) as conn:
+                migrations.verify_schema(conn, required_version=2)
+                runtime.soups = baselines.active_soups(conn)
+        else:
+            if runtime.settings.LOAD_RUNTIME_PUZZLES and _data_path("sessions.json").exists():
+                raise migrations.MigrationRequired("Legacy JSON requires explicit offline migration")
+            conn = _connect()
+            try:
+                migrations.migrate(conn, catalog, target_version=2)
+                runtime.soups = baselines.active_soups(conn)
+            finally:
+                conn.close()
+        runtime.initialized = True
+
+
+def __getattr__(name: str):
+    if name == "SOUPS":
+        return get_soups()
+    paths = {
+        "DB_FILE": "sessions.db", "LEGACY_SESSIONS_FILE": "sessions.json",
+        "GENERATED_FILE": "generated_soups.json", "VERIFIED_QA_FILE": "verified_qa_pairs.jsonl",
+    }
+    if name == "DATA_DIR":
+        return get_runtime().settings.DATA_DIR
+    if name in paths:
+        return _data_path(paths[name])
+    raise AttributeError(name)
 
 
 def _match_query(soup: Soup, q: str) -> bool:
-    """判断汤品是否命中搜索词（标题/汤面/标签/汤底摘要/完整汤底）。
+    """Public discovery searches title/surface/tags only.
 
-    新收录的汤（SEED_SOUPS 或 generated_soups.json）都会进入 SOUPS，
-    因此只要命中合并后的列表即可被搜到，无需额外改动。
+    Never select by private truth: even returning a public card would reveal
+    that a guessed secret exists in this puzzle. Legal reveal is separate.
     """
     haystack = " ".join([
         soup.title or "",
         soup.surface or "",
         " ".join(soup.tags or []),
-        soup.bottomSummary or "",
-        soup.bottom or "",
     ]).lower()
     return q in haystack
 
 
 def get_all_soups(difficulty=None, tag=None, q=None, unlocked_ids=None) -> list[Soup]:
     unlocked_ids = set(unlocked_ids or [])
-    soups = SOUPS
+    soups = get_soups()
     # 隐藏彩蛋汤默认不展示，除非在 unlocked_ids 中
     soups = [s for s in soups if not s.hidden or s.id in unlocked_ids]
     if q and q.strip():
@@ -237,7 +243,7 @@ def get_all_soups(difficulty=None, tag=None, q=None, unlocked_ids=None) -> list[
 
 
 def get_soup_by_id(sid: str):
-    for s in SOUPS:
+    for s in get_soups():
         if s.id == sid:
             return s
     return None
@@ -255,19 +261,34 @@ def _session_row_to_dict(row: sqlite3.Row, messages: list[dict]) -> dict:
         "createdAt": row["created_at"],
         "solvedAt": row["solved_at"],
         "givenUpAt": row["given_up_at"],
+        "puzzleVersion": row["puzzle_version"],
+        "ruleVersion": row["rule_version"],
+        "compatState": row["compat_state"],
+        "rowVersion": row["row_version"],
     }
 
 
 def create_session(soup_id: str, question_limit=None) -> dict:
+    initialize()  # First explicit CLI/embedded CRUD call, never module import.
     now = time.time()
     session_id = str(uuid.uuid4())
     conn = _connect()
     try:
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            baseline = baselines.active_manifest(conn)
+            from .rule_contract import rule_suspension_state
+            if rule_suspension_state(conn, baseline["ruleVersion"]):
+                raise GameConflict("rule_version_suspended")
+            version = baseline["puzzleVersions"].get(soup_id)
+            if version is None:
+                raise baselines.SnapshotError("Puzzle is not in the active baseline")
             conn.execute(
-                "INSERT INTO sessions (id, soup_id, status, questions_asked, question_limit, created_at) "
-                "VALUES (?, ?, 'playing', 0, ?, ?)",
-                (session_id, soup_id, question_limit, now),
+                """INSERT INTO sessions (id,soup_id,status,questions_asked,question_limit,created_at,
+                   puzzle_version,rule_version,compat_state,last_activity_at,traffic_class)
+                   VALUES (?,?,'playing',0,?,?,?,?,'compatible',?,?)""",
+                (session_id, soup_id, question_limit, now, version, baseline["ruleVersion"], now,
+                 "test" if get_runtime().settings.TESTING else "real"),
             )
     finally:
         conn.close()
@@ -285,37 +306,24 @@ def create_session(soup_id: str, question_limit=None) -> dict:
 
 
 def save_message(session_id: str, role: str, content: str, is_free_reminder: bool = False) -> None:
-    """追加一条消息；user 消息且非免费提醒时 question_asked +1（原子事务，并发安全）。"""
-    conn = _connect()
-    try:
-        with conn:
-            row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
-            if row is None:
-                return
-            conn.execute(
-                "INSERT INTO messages (session_id, role, content, timestamp, is_free_reminder) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (session_id, role, content, time.time(), 1 if is_free_reminder else 0),
-            )
-            if role == "user" and not is_free_reminder:
-                conn.execute(
-                    "UPDATE sessions SET questions_asked = questions_asked + 1 WHERE id = ?",
-                    (session_id,),
-                )
-    finally:
-        conn.close()
+    """Retired: a single-message writer cannot uphold paired turn invariants."""
+    raise GameConflict("atomic_writer_required")
 
 
 def get_session(session_id: str):
+    initialize()
     conn = _connect()
     try:
+        # A deferred read transaction pins one WAL snapshot across session,
+        # messages and evaluation without blocking the concurrent model writer.
+        conn.execute("BEGIN")
         row = conn.execute(
             "SELECT * FROM sessions WHERE id = ?", (session_id,)
         ).fetchone()
         if row is None:
             return None
         msgs = conn.execute(
-            "SELECT role, content, timestamp, is_free_reminder FROM messages "
+            "SELECT role, content, timestamp, is_free_reminder, turn_id FROM messages "
             "WHERE session_id = ? ORDER BY id",
             (session_id,),
         ).fetchall()
@@ -325,32 +333,51 @@ def get_session(session_id: str):
                 "content": m["content"],
                 "timestamp": m["timestamp"],
                 "isFreeReminder": bool(m["is_free_reminder"]),
+                # Already-public chat acknowledgement identity, never private HostResult.
+                # Unlinked legacy rows remain unlinked; do not guess adjacent turns.
+                **({"turnId": m["turn_id"]} if m["turn_id"] is not None else {}),
             }
             for m in msgs
         ]
-        return _session_row_to_dict(row, messages)
+        result = _session_row_to_dict(row, messages)
+        from .rule_contract import rule_suspension_state
+        result["ruleSuspended"] = (rule_suspension_state(conn, row["rule_version"])
+            if row["compat_state"] == "compatible" else False)
+        evaluation = conn.execute("SELECT * FROM evaluations WHERE session_id=?", (session_id,)).fetchone()
+        result["evaluation"] = game_responses.evaluation_response(evaluation, row) if evaluation is not None else None
+        return result
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def require_compatible(session: dict) -> None:
+    if session.get("compatState") != "compatible":
+        raise SessionCompatibilityError("Legacy session requires manual compatibility review")
+
+
+def get_session_soup(session: dict) -> Soup:
+    require_compatible(session)
+    conn = _connect()
+    try:
+        soup = baselines.session_baseline(conn, session["puzzleVersion"], session["ruleVersion"])
+        if soup.id != session["soupId"]:
+            raise baselines.SnapshotError("Session/puzzle identity mismatch")
+        return soup
     finally:
         conn.close()
 
 
 def update_session_status(session_id: str, status: str) -> None:
-    conn = _connect()
-    try:
-        with conn:
-            if status == "solved":
-                conn.execute(
-                    "UPDATE sessions SET status = ?, solved_at = ? WHERE id = ?",
-                    (status, time.time(), session_id),
-                )
-            elif status == "given_up":
-                conn.execute(
-                    "UPDATE sessions SET status = ?, given_up_at = ? WHERE id = ?",
-                    (status, time.time(), session_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE sessions SET status = ? WHERE id = ?",
-                    (status, session_id),
-                )
-    finally:
-        conn.close()
+    """Retired: only fenced finish/evaluation transactions may end a game."""
+    raise GameConflict("atomic_writer_required")
+
+
+# Approved storage interfaces remain db.*; transaction implementation has no
+# import-time database/config access and keeps model orchestration out of CRUD.
+from .game_store import (  # noqa: E402
+    GameConflict, GameNotFound, TurnReplay, TurnReservation,
+    create_game_once, reserve_turn, finish_turn, get_turn_response,
+    expire_reserved_turns, require_atomic_writer, evaluate_once, get_evaluation,
+    get_private_host_history,
+)

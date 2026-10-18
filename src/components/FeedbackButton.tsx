@@ -1,8 +1,10 @@
 'use client';
 
 import { usePathname } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { apiFetch } from '@/lib/api';
+import { loadPublicCatalog } from '@/lib/catalog';
+import type { FeedbackTurn } from '@/lib/feedback-turn';
 
 interface SoupOption {
   id: string;
@@ -15,7 +17,7 @@ interface SoupOption {
  *   ① 选汤 → ② 你问的问题 → ③ 主持人回答 → ④ 你认为正确答案 → ⑤ 理由(选填)
  * 提交走 /api/feedback（apiFetch 自动带 X-Site-Token）。
  */
-export default function FeedbackButton() {
+export default function FeedbackButton({ source }: { source?: FeedbackTurn } = {}) {
   const pathname = usePathname();
   // 管理后台页面不需要这个按钮（避免管理员自己点自己审）。
   // 注意：这个判断不能在这里直接 return —— 它下面还有 12 个 useState/useEffect，
@@ -33,10 +35,15 @@ export default function FeedbackButton() {
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState('');
+  const [catalogError, setCatalogError] = useState('');
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const catalogRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => catalogRequest.current?.abort(), []);
 
   // 输入框聚焦时自动隐藏反馈按钮，避免遮挡输入内容；失焦后恢复
   const [inputFocused, setInputFocused] = useState(false);
   useEffect(() => {
+    if (source) return;
     const onFocusIn = (e: FocusEvent) => {
       const target = e.target as HTMLElement | null;
       if (
@@ -53,26 +60,33 @@ export default function FeedbackButton() {
       document.removeEventListener('focusin', onFocusIn);
       document.removeEventListener('focusout', onFocusOut);
     };
-  }, []);
+  }, [source]);
 
   async function loadSoups() {
+    catalogRequest.current?.abort();
+    const controller = new AbortController(); catalogRequest.current = controller;
+    setCatalogLoading(true); setCatalogError('');
     try {
-      const res = await apiFetch('/api/soups');
-      const data = await res.json();
-      setSoups(Array.isArray(data.soups) ? data.soups : []);
-    } catch {
-      setSoups([]);
-    }
+      const list = await loadPublicCatalog({ signal: controller.signal });
+      if (catalogRequest.current === controller && !controller.signal.aborted) setSoups(list);
+    } catch (error) {
+      if (catalogRequest.current === controller && !controller.signal.aborted) setCatalogError(error instanceof Error ? error.message : '列表加载失败，请重试');
+    } finally { if (catalogRequest.current === controller && !controller.signal.aborted) setCatalogLoading(false); }
   }
 
   function openModal() {
     setError('');
     setDone(false);
     setOpen(true);
-    loadSoups();
+    if (source) {
+      setSoups([{ id: source.soupId, title: source.soupTitle || source.soupId }]); setSoupId(source.soupId);
+      setQuestion(source.question); setHostAnswer(source.hostAnswer); setExpectedAnswer(''); setReason('');
+      setCatalogLoading(false); setCatalogError('');
+    } else { loadSoups(); }
   }
 
   function close() {
+    catalogRequest.current?.abort();
     setOpen(false);
     setSoupId('');
     setQuestion('');
@@ -82,7 +96,8 @@ export default function FeedbackButton() {
   }
 
   const canSubmit =
-    !!soupId && !!question.trim() && !!hostAnswer.trim() && !!expectedAnswer.trim() && !submitting;
+    !!soupId && soups.some(soup => soup.id === soupId) && !catalogLoading && !catalogError
+    && !!question.trim() && !!hostAnswer.trim() && !!expectedAnswer.trim() && !submitting;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -98,6 +113,7 @@ export default function FeedbackButton() {
           hostAnswer: hostAnswer.trim(),
           expectedAnswer: expectedAnswer.trim(),
           reason: reason.trim() || undefined,
+          ...(source ? { turnId: source.turnId } : {}),
         }),
       });
       if (!res.ok) {
@@ -126,12 +142,12 @@ export default function FeedbackButton() {
       <button
         type="button"
         onClick={openModal}
-        aria-label="主持人答错了？点此提交反馈"
-        className={`fb-breathe fixed bottom-4 left-4 z-50 flex flex-col items-start gap-0.5 rounded-2xl bg-danger-strong px-3.5 py-2.5 font-bold text-white shadow-lg shadow-danger-strong/30 transition-all duration-200 hover:scale-105 active:scale-95 sm:px-5 sm:py-3 ${
+        aria-label={source ? '反馈这次回答' : '主持人答错了？点此提交反馈'}
+        className={source ? 'btn btn-ghost mt-2 block text-xs' : `fb-breathe fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-4 z-50 flex flex-col items-start gap-0.5 rounded-2xl bg-danger-strong px-3.5 py-2.5 font-bold text-white shadow-lg shadow-danger-strong/30 transition-all duration-200 hover:scale-105 active:scale-95 sm:px-5 sm:py-3 ${
           inputFocused ? 'pointer-events-none opacity-0' : 'opacity-100'
         }`}
       >
-        <span className="text-xs leading-none sm:text-sm">主持人答错了？</span>
+        <span className="text-xs leading-none sm:text-sm">{source ? '反馈这次回答' : '主持人答错了？'}</span>
         <span className="text-[10px] font-medium leading-none text-white/85 sm:text-xs">点此提交反馈 →</span>
       </button>
 
@@ -165,10 +181,16 @@ export default function FeedbackButton() {
               </div>
             ) : (
               <form onSubmit={submit} className="space-y-4">
+                {source && <p className="text-sm text-fg-muted">已关联这次回答；玩家意见不是真相，也不会自动授权模型使用。</p>}
+                {catalogLoading && <p role="status">正在加载汤品列表…</p>}
+                {catalogError && <div><p role="alert">{catalogError}</p><button type="button" className="btn btn-ghost" onClick={() => void loadSoups()}>重试列表</button></div>}
+                {!catalogLoading && !catalogError && soups.length === 0 && <p role="status">暂时没有可选择的汤品。</p>}
                 <div>
                   <label className="mb-1 block text-sm text-fg-muted">① 哪个汤出了错？</label>
                   <select
                     value={soupId}
+                    aria-label="选择反馈汤品"
+                    disabled={!!source || catalogLoading || !!catalogError}
                     onChange={(e) => setSoupId(e.target.value)}
                     className="input"
                     required
@@ -189,6 +211,7 @@ export default function FeedbackButton() {
                     onChange={(e) => setQuestion(e.target.value)}
                     className="input min-h-20"
                     placeholder="例如：故事中只有六个人吗？"
+                    readOnly={!!source}
                     required
                   />
                 </div>
@@ -197,6 +220,7 @@ export default function FeedbackButton() {
                   <label className="mb-1 block text-sm text-fg-muted">③ 主持人回答的是什么？</label>
                   <select
                     value={hostAnswer}
+                    disabled={!!source}
                     onChange={(e) => setHostAnswer(e.target.value)}
                     className="input"
                     required
@@ -237,7 +261,7 @@ export default function FeedbackButton() {
                   />
                 </div>
 
-                {error && <p className="text-xs text-danger">{error}</p>}
+                {error && <p role="alert" className="text-xs text-danger">{error}</p>}
 
                 <div className="flex justify-end gap-2 pt-1">
                   <button type="button" className="btn btn-ghost" onClick={close}>

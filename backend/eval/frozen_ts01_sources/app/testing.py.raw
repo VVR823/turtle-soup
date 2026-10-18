@@ -1,0 +1,26 @@
+"""Deterministic model transport for isolated tests, never a quality judge."""
+import json
+from threading import Lock
+
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableLambda
+
+
+class FakeModel(RunnableLambda):
+    """Return a scripted output. Does not read expected answers or call a provider."""
+
+    def __init__(self, answer: str = "与此无关"):
+        if answer not in ("是", "不是", "是也不是", "算是", "与此无关"):
+            raise ValueError("FakeModel answer must be a five-class answer")
+        self.answer = answer
+        self.calls = []
+        self._calls_lock = Lock()
+        super().__init__(self._respond)
+
+    def _respond(self, messages):
+        with self._calls_lock:
+            self.calls.append(messages)
+        return AIMessage(content=json.dumps({
+            "reasoning": "Synthetic offline fixture, not evidence of model quality.",
+            "answer": self.answer,
+        }, ensure_ascii=False))

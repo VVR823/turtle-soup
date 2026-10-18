@@ -38,7 +38,10 @@ def test_win_evaluate_completion(xinshijie):
     qa = f"玩家：{q}\n主持人：是"
     msgs = [{"role": "user", "content": q}, {"role": "host", "content": "是"}]
     ev = evaluate_completion(xinshijie, qa, messages=msgs)
-    assert ev["completion"] == 100
+    # Win-looking plaintext is not a committed typed win. Actual gameplay
+    # wins remain tested above and actual saved plot100/solved in TS07 API tests.
+    assert ev["completion"] == 0 and ev["plotProgress"] is None
+    assert ev["verifiedCoverage"] is None and ev["reconstructionScore"] is None
 
 
 def test_no_win_evaluate_completion(xinshijie):

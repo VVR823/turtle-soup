@@ -2,8 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter, useParams, useSearchParams } from 'next/navigation';
-import { Message } from '@/types';
-import { apiFetch, clearSiteToken, ApiAuthError, addUnlockedSoup, saveLastSession, getLastSession, addPlayedSoup } from '@/lib/api';
+import { normalizeEvaluationDisplay } from '@/lib/evaluation';
+import { useGameController } from '@/lib/use-game-controller';
+import type { GameTarget } from '@/lib/game-journal';
+import { feedbackTurn } from '@/lib/feedback-turn';
+import FeedbackButton from '@/components/FeedbackButton';
 import {
   TurtleIcon, ArrowLeftIcon, MaskIcon, GiftIcon, ScrollIcon, ClipboardIcon,
   TargetIcon, TrophyIcon, RefreshIcon, FlagIcon, CloseIcon, CheckIcon, AlertIcon,
@@ -12,61 +15,45 @@ import {
 
 /** 海龟汤聊天界面 - 左右分栏布局 */
 export default function GamePage() {
-  const router = useRouter();
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
   const soupId = params.id || '';
   const level = searchParams.get('level') || '';
+  return <GameView key={JSON.stringify([soupId, level])} target={{ soupId, level }} />;
+}
 
-  const [sessionId, setSessionId] = useState<string>('');
-  const [messages, setMessages] = useState<Message[]>([]);
+function GameView({ target }: { target: GameTarget }) {
+  const router = useRouter();
+  const { soupId } = target;
+  const { state, controller } = useGameController(target);
+  const session = state.session;
   const [question, setQuestion] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [soupTitle, setSoupTitle] = useState('');
-  const [gameOver, setGameOver] = useState(false);
-  const [won, setWon] = useState(false); // 隐藏彩蛋汤通关
-  const [questionLimit, setQuestionLimit] = useState<number | null>(null); // null=不限
-  const [remaining, setRemaining] = useState<number | null>(null);
   const [showReviewModal, setShowReviewModal] = useState(false);
-  const [evaluating, setEvaluating] = useState(false);
-  const [unlocks, setUnlocks] = useState<string | null>(null);
-  const [evaluation, setEvaluation] = useState<{
-    completion: number;
-    evaluation: string;
-    keyPointsCovered: string[];
-    keyPointsMissing: string[];
-    bottom: string;
-    unlockSoupId?: string | null;
-  } | null>(null);
+  const loading = state.phase === 'asking';
+  const evaluating = state.phase === 'revealing';
+  const busy = ['initializing', 'asking', 'revealing'].includes(state.phase);
+  const canAsk = state.phase === 'playing' && !!session && session.status === 'playing' && !session.ruleSuspended && !state.pending;
+  const gameOver = !!session && session.status !== 'playing';
+  const won = session?.status === 'solved';
+  const soupTitle = session?.soupTitle || '';
+  const questionLimit = session?.questionLimit ?? null;
+  const remaining = session?.remaining ?? null;
+  const unlocks = session?.unlocks;
+  const evaluation = session?.evaluation || null;
+  const chatMessages = session?.messages || [];
+  const surface = session?.soupSurface || '';
+  const evaluationDisplay = evaluation ? normalizeEvaluationDisplay(evaluation) : null;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const reviewCloseRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    if (!soupId) { alert('请先选择一道汤！'); router.push('/'); return; }
-    // 刷新/重开页面后尝试恢复上一局（同汤同难度才恢复）；恢复失败或没有则开新局
-    const saved = getLastSession();
-    if (saved && saved.soupId === soupId && saved.level === level) {
-      restoreSession(saved.sessionId).then(ok => {
-        if (!ok) startNewGame();
-      });
-    } else {
-      startNewGame();
-    }
-    // 依赖必须含 level：从难度选择页切换难度时路由不变（同为 /game/[id]，只有 query 变化），
-    // 组件不会重新挂载；若只依赖 soupId，切换难度后会继续停留在上一局，看起来像"没反应"。
-    // startNewGame 是组件内函数声明，每次渲染引用都会变，放进依赖会导致 effect 反复触发；
-    // 它实际只依赖 soupId/level，这两个值已显式列入，故有意不列函数本身。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [soupId, level, router]);
-
-  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, loading]);
+  }, [session?.messages, loading]);
 
   useEffect(() => {
-    if (!loading) inputRef.current?.focus();
-  }, [loading]);
+    if (canAsk) inputRef.current?.focus();
+  }, [canAsk]);
 
   // 复盘模态：Esc 关闭 + 打开聚焦关闭按钮
   useEffect(() => {
@@ -79,149 +66,22 @@ export default function GamePage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [showReviewModal]);
 
-  /** 恢复上次未结束的会话：拉回汤面、剩余次数与完整问答历史。 */
-  async function restoreSession(sid: string): Promise<boolean> {
-    try {
-      const res = await apiFetch(`/api/session/${sid}`);
-      if (!res.ok) return false;
-      const data = await res.json();
-      setSessionId(data.sessionId);
-      setSoupTitle(data.soupTitle);
-      setQuestionLimit(data.questionLimit ?? null);
-      setRemaining(data.remaining ?? null);
-      setUnlocks(data.unlocks ?? null);
-      const history = (data.messages || []).map((m: { role: string; content: string; timestamp: number }) => ({
-        role: m.role as 'user' | 'host',
-        content: m.content,
-        timestamp: m.timestamp,
-      }));
-      setMessages([
-        { role: 'host', content: data.soupSurface, timestamp: Date.now() },
-        ...history,
-      ]);
-      setGameOver(false);
-      setEvaluation(null);
-      setWon(false);
-      return true;
-    } catch {
-      return false;
-    }
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canAsk || !question.trim()) return;
+    void controller.ask(question); setQuestion('');
   }
-
-  async function startNewGame() {
-    try {
-      const res = await apiFetch('/api/chat', {
-        method: 'POST',
-        body: JSON.stringify({ soupId, level }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || `请求失败（${res.status}）`);
-      if (data.error) throw new Error(data.error);
-      setSessionId(data.sessionId);
-      setSoupTitle(data.soupTitle);
-      setQuestionLimit(data.questionLimit ?? null);
-      setRemaining(data.questionLimit ?? null);
-      setUnlocks(data.unlocks ?? null);
-      setMessages([{ role: 'host', content: data.soupSurface, timestamp: Date.now() }]);
-      setGameOver(false);
-      setEvaluation(null);
-      setEvaluating(false);
-      setWon(false);
-      // 记录上一局，刷新/重开页面后可恢复
-      saveLastSession({ sessionId: data.sessionId, soupId, level });
-    } catch (err) {
-      if (err instanceof ApiAuthError) {
-        clearSiteToken();
-        window.location.reload();
-        return;
-      }
-      alert('游戏创建失败，请重试');
-    }
+  function restart() {
+    if (state.pending && !window.confirm('这次请求可能已提交，另开会放弃它的恢复入口，但不会删除服务端历史。确定另开吗？')) return;
+    void controller.restart(!!state.pending);
   }
-
-  async function sendMessage(msg: string) {
-    if (!msg.trim() || loading || evaluating) return;
-    setLoading(true);
-    try {
-      setMessages(prev => [...prev, { role: 'user', content: msg, timestamp: Date.now() }]);
-      const res = await apiFetch('/api/chat', {
-        method: 'POST',
-        body: JSON.stringify({ question: msg, sessionId, soupId }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || `请求失败（${res.status}）`);
-      setMessages(prev => [...prev, { role: 'host', content: data.reply, timestamp: Date.now() }]);
-      if (data.remaining != null) setRemaining(data.remaining);
-      if (data.limitReached) {
-        setRemaining(0);
-        await evaluateAndReveal();
-      }
-      if (data.isReveal) setGameOver(true);
-      if (data.isWin) {
-        setWon(true);
-        await evaluateAndReveal(); // 命中通关条件：展示 100% 结局面板
-      }
-    } catch (err) {
-      if (err instanceof ApiAuthError) {
-        clearSiteToken();
-        window.location.reload();
-        return;
-      }
-      // 网络/后端异常（如每晚 0 点更新窗口）：聊天区显示友好错误气泡，而不是静默空白。
-      // 这类失败请求没有扣次数，提示玩家直接重发。
-      const hint = err instanceof Error && err.message ? err.message : '网络开小差了';
-      setMessages(prev => [...prev, { role: 'host', content: `⚠️ ${hint}，请重新发送你的问题（不会扣次数）`, timestamp: Date.now() }]);
-    } finally {
-      setLoading(false);
-      if (inputRef.current && !gameOver && !evaluating && !(remaining != null && remaining <= 0)) inputRef.current.focus();
-    }
-  }
-
-  async function evaluateAndReveal() {
-    if (!sessionId || evaluating || evaluation) return;
-    setEvaluating(true);
-    try {
-      const res = await apiFetch('/api/evaluate', {
-        method: 'POST',
-        body: JSON.stringify({ sessionId }),
-      });
-      const data = await res.json();
-      if (!res.ok || data.error || data.detail) {
-        throw new Error(data.error || data.detail || `揭晓答案失败 (${res.status})`);
-      }
-      setEvaluation(data);
-      setGameOver(true);
-      // 看过答案/汤底 → 按用户口径标记"玩过"；本局结束，清除待恢复会话（下次进来开新局）
-      addPlayedSoup(soupId);
-      saveLastSession(null);
-      // 如果复盘解锁了隐藏彩蛋，记录到本地
-      if (data.unlockSoupId) {
-        addUnlockedSoup(data.unlockSoupId);
-      }
-    } catch (err) {
-      if (err instanceof ApiAuthError) {
-        clearSiteToken();
-        window.location.reload();
-        return;
-      }
-      console.error(err);
-      alert('揭晓答案失败，请重试');
-    } finally {
-      setEvaluating(false);
-    }
-  }
-
-  function handleSubmit(e: React.FormEvent) { e.preventDefault(); sendMessage(question); setQuestion(''); }
-
-  const surface = messages[0]?.content || '';
-  const chatMessages = messages.slice(1);
 
   return (
     <div className="flex h-screen flex-col bg-canvas text-fg font-sans">
       {/* ====== 顶部导航栏 ====== */}
       <header className="flex shrink-0 items-center gap-3 border-b border-border/70 bg-surface/60 px-5 py-3 backdrop-blur-sm">
         <button
-          onClick={() => { saveLastSession(null); router.push('/'); }}
+          onClick={() => router.push('/')}
           className="btn btn-ghost shrink-0 px-2 py-2"
           aria-label="返回大厅"
         >
@@ -242,7 +102,7 @@ export default function GamePage() {
           {soupTitle || '加载中…'}
         </h2>
         <div className="flex w-16 shrink-0 justify-end">
-          {questionLimit != null ? (
+          {!session ? <span role="status" className="text-xs text-fg-muted">同步中</span> : questionLimit != null ? (
             <span
               className={`rounded-full border px-3 py-1 text-xs font-medium ${
                 (remaining != null && remaining <= 5)
@@ -261,11 +121,30 @@ export default function GamePage() {
         </div>
       </header>
 
+      {session?.ruleSuspended && <section className="shrink-0 border-b border-border px-5 py-3 text-sm" aria-live="polite">
+        <p>此版本规则已暂停，新提问和揭晓暂不可用；原对局与历史已保留，已结束的评估仍可查看。</p>
+        <button className="btn btn-ghost mt-2" disabled={busy} onClick={() => void controller.synchronize()}>检查暂停是否解除</button>
+      </section>}
+      {(state.error || state.phase === 'initializing' || state.phase === 'syncing') && (
+        <section className="shrink-0 border-b border-border px-5 py-3 text-sm" aria-live="polite">
+          <p role={state.error ? 'alert' : 'status'}>{state.error?.message || '正在同步原对局…'}</p>
+          {state.pending && <p className="mt-1 text-xs text-fg-muted">提交结果尚未确定，保留原请求同步，不要重复新提问。</p>}
+          {state.error?.retryAfterSeconds != null && <p>请等待 {state.error.retryAfterSeconds} 秒后再同步。</p>}
+          {!busy && (state.error || state.phase === 'syncing') && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button className="btn btn-ghost" onClick={() => void controller.synchronize()}>同步原对局</button>
+              {state.error?.category === 'auth' && <button className="btn btn-ghost" onClick={() => window.location.reload()}>重新验证口令</button>}
+              <button className="btn btn-ghost" onClick={restart}>{state.pending ? '放弃待同步请求并另开' : '另开一局'}</button>
+            </div>
+          )}
+        </section>
+      )}
+
       {/* ====== 主体：手机上下堆叠 / 电脑左右分栏 ====== */}
       <div className="flex flex-1 flex-col overflow-hidden lg:flex-row">
         {/* ---- 左栏：汤面 ---- */}
         {/* 手机端固定 35vh，内部滚动；电脑端恢复左侧固定宽度面板 */}
-        <aside className="h-[35vh] shrink-0 overflow-y-auto border-b border-border/70 bg-surface/30 lg:h-auto lg:max-h-none lg:w-[38%] lg:min-w-[300px] lg:max-w-[480px] lg:shrink-0 lg:border-b-0 lg:border-r">
+        <aside className="h-[35vh] shrink-0 overflow-y-auto border-b border-border/70 bg-surface/30 lg:mb-20 lg:h-auto lg:max-h-none lg:w-[38%] lg:min-w-[300px] lg:max-w-[480px] lg:shrink-0 lg:border-b-0 lg:border-r">
           <div className="space-y-4 p-5">
             {/* 汤面卡片 */}
             <div className="panel relative overflow-hidden p-5">
@@ -301,7 +180,7 @@ export default function GamePage() {
             {/* 提示区 */}
             <div className="panel border-border/50 p-4">
               <p className="text-xs leading-relaxed text-fg-subtle">
-                {questionLimit == null ? (
+                {session && questionLimit == null ? (
                   <>
                     <GiftIcon className="mr-1 inline-block h-3.5 w-3.5 align-[-2px] text-accent-text/80" />
                     这是一道<span className="mx-1 text-accent-text/80">隐藏彩蛋汤</span>。
@@ -325,8 +204,8 @@ export default function GamePage() {
               </button>
               <div className="mt-3 border-t border-border/40 pt-3">
                 <button
-                  onClick={() => evaluateAndReveal()}
-                  disabled={gameOver || evaluating}
+                  onClick={() => void controller.reveal()}
+                  disabled={!canAsk || gameOver || busy}
                   className="btn btn-accent w-full"
                 >
                   {evaluating ? (
@@ -334,7 +213,7 @@ export default function GamePage() {
                       <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-accent-text/40 border-t-accent-text" />
                       正在复盘…
                     </>
-                  ) : questionLimit == null ? (
+                  ) : session && questionLimit == null ? (
                     <>
                       <FlagIcon className="h-4 w-4" />
                       我认输 / 揭晓汤底
@@ -363,7 +242,9 @@ export default function GamePage() {
               </div>
             )}
 
-            {chatMessages.map((msg, i) => (
+            {chatMessages.map((msg, i) => {
+              const feedbackSource = session ? feedbackTurn(session, i) : null;
+              return (
               <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-message-in`}>
                 {msg.role === 'host' ? (
                   <div className="flex max-w-[85%] items-start gap-2.5">
@@ -371,7 +252,8 @@ export default function GamePage() {
                       <MaskIcon className="h-4 w-4" />
                     </div>
                     <div className="rounded-2xl rounded-tl-sm border border-accent-text/10 bg-surface px-4 py-2.5 text-sm leading-relaxed text-fg shadow-sm">
-                      {msg.content}
+                      <p>{msg.content}</p>
+                      {feedbackSource && <FeedbackButton key={feedbackSource.turnId} source={feedbackSource} />}
                     </div>
                   </div>
                 ) : (
@@ -380,7 +262,8 @@ export default function GamePage() {
                   </div>
                 )}
               </div>
-            ))}
+              );
+            })}
 
             {/* 加载中动画 */}
             {loading && (
@@ -401,33 +284,42 @@ export default function GamePage() {
           </div>
 
           {/* 游戏结束覆盖层：完成度评价 + 完整汤底 */}
-          {evaluation && (
+          {evaluation && evaluationDisplay && (
             <div className="absolute inset-0 z-20 space-y-4 overflow-y-auto bg-canvas px-6 py-5">
               <div className="flex items-center gap-3">
                 {won ? <TrophyIcon className="h-6 w-6 text-accent-text" /> : <TargetIcon className="h-6 w-6 text-accent-text" />}
                 <div>
                   <div className="text-base font-bold text-accent-text">{won ? '通关！' : '真相揭晓'}</div>
-                  <div className="text-xs text-fg-subtle">{won ? '你已看穿隐藏彩蛋的终极真相' : 'AI 根据本局问答自动评估的还原完成度'}</div>
+                  <div className="text-xs text-fg-subtle">{won ? '已达成彩蛋通关条件，剧情进度单独展示'
+                    : evaluation.scoreVersion ? '记录中被明确问清的事实，不代表已还原故事'
+                    : '历史记录采用旧计分方式，不代表已确认事实'}</div>
                 </div>
                 <div className="ml-auto text-right">
-                  <div className="text-xl font-bold text-accent-text">{evaluation.completion}%</div>
-                  <div className="text-[10px] text-fg-subtle">完成度</div>
+                  <div className="text-xl font-bold text-accent-text">{evaluationDisplay.coverageValue}%</div>
+                  <div className="text-[10px] text-fg-subtle">{evaluationDisplay.coverageLabel}</div>
                 </div>
               </div>
 
-              <div className="h-2 w-full rounded-full bg-border">
+              <div className="h-2 w-full rounded-full bg-border" role="progressbar"
+                aria-label={evaluationDisplay.coverageLabel} aria-valuemin={0} aria-valuemax={100}
+                aria-valuenow={evaluationDisplay.coverageValue ?? undefined}>
                 <div
                   className="h-2 rounded-full bg-gradient-to-r from-accent to-accent-text transition-all"
-                  style={{ width: `${evaluation.completion}%` }}
+                  style={{ width: `${evaluationDisplay.coverageValue ?? 0}%` }}
                 />
               </div>
+
+              <p className="text-sm text-fg-muted">还原程度：{evaluationDisplay.reconstructionLabel}</p>
+              {evaluationDisplay.plotValue != null && (
+                <p className="text-sm text-accent-text">剧情进度（非还原评分）：{evaluationDisplay.plotValue}%</p>
+              )}
 
               <p className="text-sm leading-relaxed text-fg-muted">{evaluation.evaluation}</p>
 
               {evaluation.keyPointsCovered && evaluation.keyPointsCovered.length > 0 && (
                 <div>
                   <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-success">
-                    <CheckIcon className="h-3.5 w-3.5" /> 已触及的关键点
+                    <CheckIcon className="h-3.5 w-3.5" /> {evaluation.scoreVersion ? '已确认的计分要点' : '旧记录中的已触及要点'}
                   </div>
                   <div className="flex flex-wrap gap-1.5">
                     {evaluation.keyPointsCovered.map((p, i) => (
@@ -443,7 +335,7 @@ export default function GamePage() {
               {evaluation.keyPointsMissing && evaluation.keyPointsMissing.length > 0 && (
                 <div>
                   <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-danger">
-                    <CloseIcon className="h-3.5 w-3.5" /> 尚未触及的关键点
+                    <CloseIcon className="h-3.5 w-3.5" /> {evaluation.scoreVersion ? '尚未确认的计分要点' : '旧记录中的未触及要点'}
                   </div>
                   <div className="flex flex-wrap gap-1.5">
                     {evaluation.keyPointsMissing.map((p, i) => (
@@ -476,14 +368,15 @@ export default function GamePage() {
 
               <div className="flex justify-center gap-3 pt-1">
                 <button
-                  onClick={() => { setMessages([]); setEvaluation(null); setGameOver(false); startNewGame(); }}
+                  onClick={restart}
+                  disabled={busy}
                   className="btn btn-accent"
                 >
                   <RefreshIcon className="h-4 w-4" />
                   再来一局
                 </button>
                 <button
-                  onClick={() => { saveLastSession(null); router.push('/'); }}
+                  onClick={() => router.push('/')}
                   className="btn btn-ghost"
                 >
                   <ArrowLeftIcon className="h-4 w-4" />
@@ -499,7 +392,7 @@ export default function GamePage() {
 
           {/* ---- 底部输入框（通栏） ---- */}
           {!gameOver && !evaluating && (
-            <div className="shrink-0 border-t border-border/70 bg-surface/60 px-4 py-3 pb-5 backdrop-blur-sm sm:pb-3">
+            <div className="shrink-0 border-t border-border/70 bg-surface/60 px-4 py-3 pb-[calc(5rem+env(safe-area-inset-bottom))] backdrop-blur-sm sm:pb-3">
               {questionLimit != null && remaining != null && remaining <= 0 ? (
                 <div className="flex items-center justify-center gap-2 py-1 text-sm text-danger/90">
                   <AlertIcon className="h-4 w-4" />
@@ -514,12 +407,13 @@ export default function GamePage() {
                     onChange={e => setQuestion(e.target.value)}
                     placeholder="输入你的问题（例如：主角是盲人吗？）"
                     aria-label="向主持人提问"
-                    disabled={loading || evaluating}
+                    disabled={!canAsk}
+                    maxLength={500}
                     className="input flex-1 text-base"
                   />
                   <button
                     type="submit"
-                    disabled={loading || evaluating || !question.trim()}
+                    disabled={!canAsk || !question.trim()}
                     className="btn btn-solid shrink-0"
                   >
                     发送
@@ -571,7 +465,7 @@ export default function GamePage() {
               {chatMessages.map((msg, i) => {
                 if (msg.role !== 'user') return null;
                 const hostReply = chatMessages[i + 1]?.role === 'host' ? chatMessages[i + 1].content : '';
-                const isFree = hostReply.startsWith('🤔') || hostReply.startsWith('🎯') || hostReply.startsWith('⚠️') || hostReply.startsWith('🤖');
+                const isFree = msg.isFreeReminder === true || chatMessages[i + 1]?.isFreeReminder === true;
                 return (
                   <div key={i} className="panel border-border/60 p-3.5">
                     <div className="flex items-start gap-2">

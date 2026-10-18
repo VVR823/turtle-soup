@@ -1,169 +1,121 @@
-# 许二木海龟汤自助 · Turtle Soup AI Host
+# Turtle Soup · 海龟汤 AI 主持人
 
-一个基于大模型的「海龟汤」（情境推理）游戏。玩家向 AI 主持人提问，主持人被严格约束为只回答 **是 / 不是 / 是也不是 / 算是 / 与此无关** 五种之一，玩家通过有限次数的提问还原隐藏剧情（汤底）。
+玩家通过提问还原隐藏剧情。玩法目标是让主持人回答“是 / 不是 / 是也不是 / 算是 / 与此无关”，并提供难度、会话恢复、揭晓和反馈审核。
 
-这是一个 **Python 后端 + AI Agent 方向的求职作品**，重点不在于「能聊天」，而在于把一条带确定性兜底、可观测、可量化评测的 AI 判定链路真正跑上线。
+这是一个 **Python + AI 应用项目**：FastAPI 后端、Next.js 前端、确定性规则与词面检索、免费模型兜底，以及受控反馈修复 Agent。核心工程包括幂等会话、版本化规则、反馈审计、候选审核、完整分母评测、发布回滚和数据恢复。
 
----
+## 当前发布状态（2026-10-18）
 
-## ✨ 核心特性
+- 在线演示：<http://47.97.33.174/>（需要项目访问口令；当前按原部署方式使用 HTTP IP）。
+- 模型：智谱 `glm-4-flash-250414`，生产真实兜底调用已验证；免费资格以供应商当前政策为准。
+- 质量：110 条人工确认题的同模型、同预算对比中，纯 LLM 62.73%、冻结旧系统 50.91%、当前系统 79.09%。79.09% 是修复后同集回归成绩，不冒充新的独立盲测。
+- 最终门禁：后端及离线评测 3107 通过、14 个环境相关用例明确跳过；前端 722、测试框架 103、API 冒烟 3、浏览器流程 35 全部通过，TypeScript 与 ESLint 通过。
+- 运维：生产 schema 5 迁移、停写备份恢复、恢复副本启动、旧 release 回退与重新前滚均已演练；站点口令和管理员口令分离，运行数据与发布目录分离。
+- 更新规则：正在玩的对局固定使用开局版本，新对局使用最新发布版本。反馈审核通过不会自动改答案，候选仍须真人确认并单独发布；生产自动修复 Agent 当前关闭。
 
-- **约束式 AI 主持**：主持人回答被严格限制在五选一，避免大模型自由发挥导致玩法崩坏；通过「确定性规则（confusionPoints）+ 结构化规则（本格/变格、角色数）+ RAG + LLM 兜底」多级判定，兼顾规则精度与泛化能力。
-- **三档难度**：许二木 / 包子 / 天一——**提问上限按每道汤分别设定**（同一道汤三档相差 5 次），提问次数越少越难；非是非题只提示、不扣次数。
-- **66 道题库**：覆盖本格 / 变格、校园、悬疑、民俗等多类题材，含一个隐藏彩蛋汤。
-- **全链路 Trace 日志**：每一题的判定路径（命中哪条规则、走了哪个分支、最终答案）按会话落盘，可回放、可审计。
-- **端到端评测**：基于 1565 条**真实视频问答对**跑通整条判定链路（覆盖全部 65 道非彩蛋汤），**硬准确率 97.7%**，把「AI 答得对不对」从主观感受变成可量化、可复现的指标。
-- **玩家反馈闭环**：玩家纠错进入后台审阅台，审核通过后每晚 0 点自动合并为主持人规则——规则进化不需要改代码。
-- **线上常驻部署**：systemd 常驻服务 + 主机 nginx 反向代理，公网 IP 直接可玩；题库/规则的更新只需重启后端，玩家会话进度不丢。
+完整验收边界见[最终验收收尾](ACCEPTANCE_CLOSEOUT_2026-10-18.md)。历史 TS 状态文档保留各阶段证据，不代表当前最终状态。
 
----
+## 当前实现与边界
 
-## 🧱 技术栈
+当前正式验收为 54/60。剩余项目是远程 CI/跨平台证据、一次真人语义审核与发布、可选的域名/TLS，以及后续个人讲解学习；详情以[验收进度快照](ACCEPTANCE_PROGRESS.md)为准。
 
-| 层 | 选型 |
+- 主持人判定链：特殊剧情/流程 → 来源绑定的整句或全分句规则（含精确元数据）→ 是否问法提醒 → 完整汤底和有界证据/历史的模型兜底；模糊相似度和宽正则不直接决定答案。
+- SQLite 保存会话、消息、版本化基线、反馈、审计、Agent 任务和规则发布记录；必要业务审计同事务、HTTP 尝试独立有界保存，见[请求审计](docs/request-audit.md)。生产迁移、停写恢复和 release 回滚已验证，私密 Trace 与真实玩家数据不进入 Git。
+- `create_app(Settings, model=..., soups=...)` 支持应用级数据目录、题库、模型、缓存和限流器隔离；初始化与资源释放由应用启动/关闭管理。
+- 默认测试使用临时 SQLite 和固定输出的 FakeModel，不读取真实 dotenv，不允许真实模型/生产站点请求。
+- 110 条正式题已完成人工确认、去重和封存；同一题集下的纯 LLM、冻结旧系统和当前系统真实比较已完成，见[评测运行器](docs/evaluation-runner.md)和[最终验收收尾](ACCEPTANCE_CLOSEOUT_2026-10-18.md)。
+- 部署采用不可变 release、独立数据目录、systemd 服务和 Nginx 反向代理；当前未配置域名与 TLS。
+
+整轮事务与请求恢复、分窗口限流、模型准入、语义规则、版本化缓存、严格事实覆盖、页面恢复和规则发布均有自动化证据。生产调用和恢复已验证；模型 79.09% 仍属于同集回归结果，不能解释为未知题上的泛化准确率。
+
+## 技术栈
+
+| 层 | 当前选型 |
 | --- | --- |
-| 前端 | Next.js 16 (React 19) + TypeScript + Tailwind CSS |
-| 后端 | FastAPI + LangChain + Pydantic |
-| 大模型 | **智谱 GLM-4-Flash**（永久免费、128K 上下文；`config.py` 支持 ollama / siliconflow / zhipu 一键切换） |
-| 存储 | SQLite（`sessions.db`，会话状态）+ JSON Lines（反馈 / Trace / 已审核问答对） |
-| 部署 | systemd（`turtle-backend` / `turtle-frontend`）+ 主机 nginx（:80 反代 `/api/` → :8000，其余 → :3000） |
+| 前端 | Next.js 16 / React 19 / TypeScript / Tailwind CSS |
+| 后端 | Python 3.11–3.13 / FastAPI / Pydantic / LangChain |
+| 模型 | 保留现有供应商配置；测试使用 FakeModel，无外部模型费用 |
+| 存储 | SQLite 001不可变基线、002反馈/审计、显式003 Agent任务/步骤/候选、显式004私有统计；默认启动要求002，不自动003/004，默认Agent关闭；TS15人工发布同事务与提交前新鲜度校验已完成本地审查修复 |
+| 工程验证 | pytest / Vitest / API 冒烟与独立真实浏览器 UI 门禁 / GitHub Actions 配置 |
 
----
+0 付费是项目约束，不是供应商永久免费的承诺。真实调用前须核实账户、模型和当天规则，不能默认免费额度覆盖所有模型与操作。
 
-## 🔧 本地开发
+## 首次运行：不需要模型密钥
+
+从仓库根目录运行。先准备 Node **22.17.0**、Python **3.11–3.13**、uv **0.12.3**。安装下载需要网络；随后测试不需要联网或安装浏览器。
+
+PowerShell：
+
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = Join-Path (Get-Location) 'backend/.venv-ts01'
+$env:UV_CACHE_DIR = Join-Path (Get-Location) '.cache/uv'
+uv sync --project backend --locked --group dev --python python --no-managed-python
+npm ci --ignore-scripts
+npm run test:offline
+npm run typecheck
+```
+
+Linux/macOS shell：
 
 ```bash
-# 后端（FastAPI，默认 http://localhost:8000）
-cd backend
-python -m venv .venv
-.venv\Scripts\activate           # Windows
-pip install -r requirements.txt
-uvicorn app.main:app --port 8000
-
-# 前端（Next.js，默认 http://localhost:3000）
-npm install
-npm run dev
+export UV_PROJECT_ENVIRONMENT="$PWD/backend/.venv-ts01"
+export UV_CACHE_DIR="$PWD/.cache/uv"
+uv sync --project backend --locked --group dev --python python --no-managed-python
+npm ci --ignore-scripts
+npm run test:offline
+npm run typecheck
 ```
 
-前端通过 CORS 直连后端 `:8000`；访问口令由 `X-Site-Token` 头携带，服务端读取后端 `.env` 的 `SITE_PASSWORD` 校验。模型与密钥配置见 `backend/.env.example`。
+`pyproject.toml + uv.lock` 和 `package.json + package-lock.json` 是安装依据；`requirements.txt` 仅保留旧 pip 部署兼容性，不保证传递依赖复现。不要复用本机损坏的旧 `.venv`。
 
----
+测试步骤、报错处理和真实模型 opt-in 见 [离线测试操作指南](docs/testing.md)。CI 配置已加入，但没有远程运行证据，不能称为 CI 已通过。
 
-## 🚀 线上部署（systemd + nginx）
+## 本地开发与部署
 
-线上是**单机 systemd 部署**（非容器）：后端与前端各由一个 systemd 服务常驻，主机 nginx 在 :80 做反向代理。
+从仓库根目录使用 `python scripts/run-backend.py` 启动后端，前端使用 `npm run dev`。后端入口固定一个 worker、loopback 监听，并关闭 Uvicorn 对代理头的提前改写；可信代理统一由应用配置决定。直接从 backend 目录运行时必须使用 `uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-proxy-headers`，不能省略最后一项。它们不是隔离测试入口，启动后端会加载运行配置、初始化数据并可能调用真实模型；`python scripts/run-backend.py --check` 只检查配置，不启动服务，也不证明真实部署安全。请先阅读 [测试运行时参考](docs/test-runtime.md)，明确数据目录和配置边界。
 
+前端通过 `NEXT_PUBLIC_API_BASE` 指定后端地址，站点口令使用 `X-Site-Token`，管理员口令使用独立的 `X-Admin-Token`。后端供应商密钥不应暴露给浏览器。
+
+[旧部署说明](deploy/README.md)仅作历史参考，不应直接覆盖现网。当前生产发布已使用不可变 release 和独立数据目录完成迁移、恢复及回滚验证；操作原理见[本地隔离发布与恢复指南](docs/howto-local-release.md)。站点口令和管理口令必须使用不同值，相同非空配置会拒绝启动。当前 HTTP IP 能正常使用，但公开长期运行建议配置域名与免费 TLS 证书。
+
+## 导读
+
+- [求职项目展示](docs/showcase.md)与[简历草稿/数字证据](docs/resume-evidence.md)：AI应用主线、Agent差异和Python工程；区分AI协作及本人掌握，旧数字不替代真实成绩。
+- [公开前有限盘点](docs/publication-preflight.md)：两个产物完整性、Git元数据与缺少的内容/许可/视频门禁；当前不能自动上传。
+- [成品学习路线](docs/learning/project-learning-map.md)、[九模块学习卡](docs/learning/core-module-cards.md)与[安全独立练习](docs/learning/practice-checklist.md)：从一次提问到Agent/恢复，连接真实失败、源码和原生测试；材料存在不代表本人已学会，命令核验/材料审查状态以TS18 ledger为准。
+- [TS17唯一审查修复](docs/ts17-review-resolution.md)与[冻结身份恢复矩阵](docs/release-recovery.md)：所有裁定和未知格保留，不将绿色本地测试当生产恢复授权。
+
+- [TS17本地发布/恢复指南](docs/howto-local-release.md)与[资源测量参考](docs/ts17-resource-measurements.md)：合成规则命中/兜底、100模型名额申请、实际审计/trace增长与关闭已测；不是生产容量、真实模型成绩或部署通过。
+
+- [私有统计参考](docs/metrics-reference.md)、[操作指南](docs/metrics-howto.md)、[大白话口径](docs/metrics-explanation.md)与[TS16状态](docs/ts16-status.md)：显式004、手动私有汇总/完整导出及200/1000/5000合成测量已实跑，唯一工程审查/一次修复与最终门禁已结束；原后续发布回归失败统计来源仍欠，不代表真实用户或AI修复正确率。
+
+- [How to 运行离线测试](docs/testing.md)：安装、单项测试、失败排查、哈希检查。
+- [测试运行时参考](docs/test-runtime.md)：工厂接口、配置、数据与网络边界。
+- [为什么采用应用级隔离](docs/adr/0001-test-isolation.md)：设计取舍和 Windows 子进程问题。
+- [TS-01 实施状态](docs/ts01-status.md)：实测证据、未验收项目和发布阻断项。
+- [TS-02 实施状态](docs/ts02-status.md)与[隔离迁移指南](docs/migrations.md)：已有旧库不会在启动时自动升级；未执行生产迁移。
+- [TS-07 评分状态](docs/ts07-status.md)：严格事实覆盖、null 还原、剧情分离、旧分数和真实验证边界。
+- [TS-08 页面恢复状态](docs/ts08-status.md)：初始化/重复点击/断网刷新/揭晓恢复、审查修复与本地浏览器证据及保留边界。
+- [为什么断网后要同步原请求](docs/game-recovery.md)：恢复原理与取舍，适合开始学习这个项目。
+- [独立评测数据操作](docs/evaluation-data.md)与[TS11状态](docs/ts11-status.md)：110私有AI草案、人工审核、关联隔离、完整封存与禁止holdout回填；不是已测得的模型准确率。
+- [完整分母评测](docs/evaluation-runner.md)与[TS12状态](docs/ts12-status.md)：真实宿主的离线Fake驱动、完整失败/未知用量、全重复/同预算比较、安全旧入口；本地审查修复完成，真实质量结论null。
+- [Agent工具接口](docs/agent-tools-reference.md)与[大白话解释](docs/agent-tools-explanation.md)：TS13五工具、权限/幂等、固定合成回归与未批准候选预览已完成本地工程验收；真实独立题集/模型质量仍待定。
+- [Agent循环参考](docs/agent-loop-reference.md)、[大白话解释](docs/agent-loop-explanation.md)、[本地复现](docs/agent-loop-howto.md)与[TS14状态](docs/ts14-status.md)：10模型/8工具/180秒、断点/取消/独立心跳、管理员最小接口、8条声明合成任务报告；本地审查/一次修复及最终门禁完成，较小审计分类问题留TS17，不冒充真实人审或自动上线。
+- [候选审核接口](docs/candidate-review-reference.md)、[为什么AI建议不能直接上线](docs/candidate-review-explanation.md)与[TS15状态](docs/ts15-status.md)：真实轮次反馈、手动脱敏、任务、原问题/前文与完整证据、单独批准/发布、回滚；唯一阶段审查与一次修复回归已完成，合成浏览器验证不是人审质量或上线证明。
+
+```text
+backend/app/main.py          应用工厂、生命周期、API
+backend/app/runtime.py       应用级状态与请求上下文
+backend/app/ai_host.py       原主持人判定链，模型 transport 按应用持有
+backend/app/db.py            会话存储与题库初始化
+backend/app/testing.py       固定输出 FakeModel，不是质量裁判
+backend/testing/guards.py   pytest 内容访问与网络防误用保护
+backend/tests/              后端单元/契约/隔离测试
+backend/eval/               独立数据/审核/封存/完整评测/比较；固定Fake CLI，不是Agent工具
+backend/eval/tests/         默认数据合同门禁；合成人工声明不是真人审核
+src/lib/api.test.ts          前端 API 客户端与本地存储单元测试
+tests/e2e/                  隔离后端的 API 冒烟，尚非浏览器 UI 测试
+tests/ui/                   另行运行的自有 Edge/Playwright 页面恢复门禁
+scripts/                    本地测试入口和哈希验证
+.github/workflows/          默认无真实模型凭据的测试流水线配置
 ```
-用户 → nginx :80 ─┬─ /api/  → turtle-backend   (127.0.0.1:8000)
-                  └─ 其余    → turtle-frontend  (127.0.0.1:3000)
-```
-
-- 服务单元：`/etc/systemd/system/turtle-backend.service`、`turtle-frontend.service`
-- 后端目录：`/opt/turtle-soup/backend`
-- 前端目录：`/opt/turtle-soup/frontend`（Next.js standalone 产物）
-- 部署脚本与详细步骤：见 [`deploy/README.md`](deploy/README.md)（`deploy_all.py` / `deploy_backend.py` / `upload_frontend.py`）
-
-日常更新（改完题库或判定规则后）：
-
-```bash
-systemctl restart turtle-backend     # 题库 / 判定规则改动
-systemctl restart turtle-frontend    # 前端改动（先重新 build 并上传产物）
-```
-
-重启耗时约 2–3 秒，会话状态存在 SQLite 中，**玩家进度不会丢**。
-
-> 仓库里的 `docker-compose.yml`、`Dockerfile.frontend`、`backend/Dockerfile.backend` 是**早期容器化方案**，已不再用于线上——原因是容器与 systemd 曾双轨共存，80 端口被旧容器占用，导致代码更新不生效；现保留用于**本地一键拉起整套环境**。
-
----
-
-## 📂 目录结构（关键文件）
-
-```
-turtle-soup/
-├── backend/
-│   ├── app/
-│   │   ├── main.py             # 入口：/api/soups、/api/chat、/api/evaluate、/health
-│   │   ├── ai_host.py          # ★ 主持人判定核心：confusionPoints→结构化规则→RAG→LLM
-│   │   ├── soups.py            # 题库（66 道）+ 每道汤的元数据
-│   │   ├── prompts.py          # 主持人 / 复盘 System Prompt
-│   │   ├── rag.py              # RAG 检索引擎（关键词 + 编辑距离 + bigram）
-│   │   ├── trace_logger.py     # 按 session 落盘判定路径，可回放
-│   │   ├── feedback_utils.py   # 玩家反馈归一化与校验
-│   │   ├── db.py               # SQLite 会话存储
-│   │   ├── rate_limit.py       # 滑动窗口限流（按真实 IP）
-│   │   ├── config.py           # 环境变量（provider / 密钥 / 口令 / 开关）
-│   │   └── scripts/
-│   │       ├── eval_host_accuracy.py  # 端到端判定准确率评测
-│   │       ├── inject_eval_fixes.py   # 评测错误 → 规则注入
-│   │       └── inject_cps.py          # AST 精准插入易错点
-│   ├── data/
-│   │   ├── sessions.db                # 会话库（SQLite）
-│   │   ├── verified_qa_pairs.jsonl    # 已审核问答对（启动时注入规则）
-│   │   └── eval/qa_pairs/             # 真实视频问答对评测集（1565 条）
-│   └── tests/                         # pytest（多汤 QA 回归 + 接口参数校验，71 用例）
-├── src/                        # 前端（Next.js 应用源码）
-├── deploy/                     # 部署脚本与指南
-└── 讲解复习手册.md              # 逐文件讲解稿（面试自用）
-```
-
----
-
-## 📊 评测与质量
-
-`backend/app/scripts/eval_host_accuracy.py` 解析标准问答集（**1565 条有效是否问法，覆盖全部 65 道非彩蛋汤**，评测文件随仓库提供于 `backend/data/eval/qa_pairs/`；**全部来自真实 B站海龟汤视频问答记录**——40 道视频源 + 25 道无源汤的评测也由对应合集视频补全，彩蛋汤新世界无判定点豁免），直接调用主持人判定函数做端到端验证：
-
-- **硬准确率 97.7%**（正确 1500 / 错误 35 / 需复核 30，需复核的元回答不计入硬指标）。
-- **评测口径（诚实、可复现）**：视频口语含大量上下文问法（"他啥意思""为什么是XX"），单句独立评测时主持人给引导属合理行为、不测判定能力——评测前用 `is_yes_no_question` 剔除这类非是否问法（2016 条中 451 条），口径 = **纯是否问法下的判定准确率**。
-- **评测错误 → 规则注入闭环**：答错的真实玩家问法经 `inject_eval_fixes.py` 过滤噪音后批量生成 ConfusionPoint，写入 `verified_qa_pairs.jsonl` 自动注入各汤——评测集本身就是主持人持续进化的训练资产（255 条已注入并部署线上）。
-- 剩余 35 个错误全部在 LLM 兜底分支（126 题走 LLM、准确率 76.3%），确定性规则层命中即答对。
-- 修复过的典型问题：复合陈述「整句锁定」优先、爷爷「死了吗」等歧义问法的窄正则兜底、身份归属类问题误跳 RAG、评测解析对「问/答」「编号+箭头」格式的兼容、真实视频评测暴露的"规则自评 100% 虚高"。
-- 报告产物：`backend/data/eval/eval_report.md` 与 `.json`。
-
-**回归测试（改动的准入门槛）**：`backend/tests/` 共 **71 个 pytest 用例**——60 个主持人多汤 QA 回归（逐题打 `/api/chat` 比对真实视频标答）+ 11 个接口参数校验，全绿才算改动合格。
-
-```bash
-cd backend
-pytest tests/ -q --ignore=tests/online      # 全量回归（online/ 为线上冒烟，需部署后手动跑）
-```
-
-**接口健壮性**：`/api/chat` 创建会话时，`level` 参数走白名单（`xuermu` / `baozi` / `tianyi`）。**缺省或非法一律回退到最严格档**——题库中除 `unlimited` 彩蛋汤外全部定义了提问上限，若像旧实现那样把非法值静默当作"不限次"，直接访问 `/game/{id}`（不带 `?level=`）就能绕过次数限制。`test_level_param.py` 已把这条锁死。
-
-**复现评测**（clone 仓库后直接跑，无需桌面文件）：
-
-```bash
-cd backend
-pip install -r requirements.txt
-python -m app.scripts.eval_host_accuracy          # 自动读取仓库内置 qa_pairs/，输出报告
-python -m app.scripts.eval_host_accuracy --only 双鱼,七宗罪   # 只跑指定汤
-python -m app.scripts.eval_host_accuracy --test-dir <其它目录>  # 自定义评测目录
-```
-
----
-
-## 🔍 判定链路（主持人怎么答）
-
-主持人收到提问后按优先级判定：
-
-1. **彩蛋 / 胜利条件** —— 命中直接裁定
-2. **confusionPoints（确定性兜底）** —— 题库内编写的窄正则 / 别名，最精确优先
-3. **genre / castCount 通用规则** —— 本格 / 变格、角色数量等结构化约束
-4. **是否类检测** —— 非是否问法只引导、不扣次数
-5. **RAG + LLM 兜底** —— 非确定性问答交给大模型，并受五选一约束收口
-
-这一设计让「常见陷阱」由规则精准拦截，「未知问题」由模型兜底，既稳又不容易答崩。
-
----
-
-## 🔐 访问控制
-
-- 站点访问需要口令（防滥用，非盈利），由 `X-Site-Token` 头传入；服务端读取 `.env` 中的 `SITE_PASSWORD` 校验。
-- 反馈管理后台另有独立口令（`ADMIN_TOKEN`），未配置时后台接口自动关闭。
-- 大模型密钥（如 `ZHIPU_API_KEY`）只在后端持有，不暴露给浏览器。
-
----
-
-## 📌 备注
-
-- 本项目为求职展示作品；服务器到期后不影响本地复现与构建。
-- 当前线上站点通过 HTTP 提供服务；如需 HTTPS，需自备域名并接入证书。
-- **文档同步约定**：任何代码 / 配置 / 题库 / 部署方式的改动，都要回头同步更新本 README 及 `讲解复习手册.md`，避免文档描述与真实架构脱节。

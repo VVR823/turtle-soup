@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { API_BASE, apiFetch, clearSiteToken, ApiAuthError, getUnlockedSoups } from '@/lib/api';
+import { loadPublicCatalog, type PublicSoup } from '@/lib/catalog';
 import {
   TurtleIcon, ArrowLeftIcon, CoffeeIcon,
 } from '@/components/icons';
@@ -13,12 +13,7 @@ interface DifficultyLimits {
   tianyi: number;
 }
 
-interface Soup {
-  id: string;
-  title: string;
-  difficulty: number;
-  difficultyLimits?: DifficultyLimits;
-}
+type Soup = PublicSoup;
 
 type Tone = 'danger' | 'accent' | 'success';
 
@@ -78,36 +73,37 @@ const LEVELS: Array<{
 ];
 
 export default function DifficultyPage() {
-  const router = useRouter();
   const params = useParams<{ id: string }>();
   const soupId = params.id || '';
+  return <DifficultyView key={soupId} soupId={soupId} />;
+}
+
+function DifficultyView({ soupId }: { soupId: string }) {
+  const router = useRouter();
 
   const [soup, setSoup] = useState<Soup | null>(null);
   const [loading, setLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState('');
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!soupId) return;
+    const controller = new AbortController();
     (async () => {
       try {
-        const unlocked = getUnlockedSoups().join(',');
-        const url = unlocked ? `/api/soups?unlocked=${encodeURIComponent(unlocked)}` : '/api/soups';
-        const res = await apiFetch(url);
-        const data = await res.json();
-        const list: Soup[] = data.soups || [];
+        const list = await loadPublicCatalog({ signal: controller.signal });
+        if (controller.signal.aborted) return;
         const found = list.find(s => s.id === soupId) || null;
         setSoup(found);
       } catch (err) {
-        if (err instanceof ApiAuthError) {
-          clearSiteToken();
-          window.location.reload();
-          return;
-        }
-        setSoup(null);
+        if (controller.signal.aborted) return;
+        setCatalogError(err instanceof Error ? err.message : '列表加载失败，请重试');
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     })();
-  }, [soupId]);
+    return () => controller.abort();
+  }, [soupId, attempt]);
 
   return (
     <div className="min-h-screen bg-canvas text-fg">
@@ -148,6 +144,8 @@ export default function DifficultyPage() {
 
       {/* 难度卡片 */}
       <main className="relative mx-auto max-w-4xl px-6 py-10">
+        {catalogError && <div className="panel p-5"><p role="alert">{catalogError}</p>
+          <button className="btn btn-ghost mt-3" onClick={() => { setCatalogError(''); setLoading(true); setAttempt(value => value + 1); }}>重试列表</button></div>}
         {loading && (
           <div className="flex items-center justify-center py-20 text-fg-subtle">
             <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-border border-t-accent-text" />
@@ -155,7 +153,7 @@ export default function DifficultyPage() {
           </div>
         )}
 
-        {!loading && !soup && (
+        {!loading && !catalogError && !soup && (
           <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border py-20 text-center">
             <p className="text-xl text-fg-muted">没有找到这道汤哦~</p>
             <button

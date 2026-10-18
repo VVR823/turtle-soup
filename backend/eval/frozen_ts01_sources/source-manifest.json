@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "baselineId": "ts01-captured-working-tree",
+  "digest": "255afe9f471ce2316734f0a9c9e30793dbd978ece9ba223d7d7bf53e7ffb6898",
+  "sources": [
+    {
+      "path": "backend/app/__init__.py",
+      "sha256": "b24b1b97c6ecfc1f97962a95bc684311a368dd8b605db0e1846d0e9f1df01cbf",
+      "bytes": 50
+    },
+    {
+      "path": "backend/app/ai_host.py",
+      "sha256": "7465b6e4c321235ea16a98953145bd9a744e6d421fe2829a51357795c15ea5fd",
+      "bytes": 58851
+    },
+    {
+      "path": "backend/app/rag.py",
+      "sha256": "8afaa25e7fbd6b67dd04875cddea518b4cad0819b2a2f40a4669e5d67daec76b",
+      "bytes": 5841
+    },
+    {
+      "path": "backend/app/prompts.py",
+      "sha256": "d04bc94968c69b03beb8176196b12f21f95f431c5f2f8a677c7f6674764804a6",
+      "bytes": 9703
+    },
+    {
+      "path": "backend/app/schemas.py",
+      "sha256": "06455a44602ce57ab7dc206e18b775624a35b90b4eb4b86e2a4c00a2aa415abc",
+      "bytes": 7235
+    },
+    {
+      "path": "backend/app/config.py",
+      "sha256": "b93a2625ed19c9e816c645d9a364c691d1366eae2889679e4555317f67dd1523",
+      "bytes": 5251
+    },
+    {
+      "path": "backend/app/runtime.py",
+      "sha256": "7e772a5a0c80c3517a04ff0aa48e4d2252e6099283ad458b7bfa3adda521de20",
+      "bytes": 2317
+    },
+    {
+      "path": "backend/app/paths.py",
+      "sha256": "a7a7fc90bf45ba83a98a58ca50a0e40f46b92c711fa635628d0b57a1a643a416",
+      "bytes": 970
+    },
+    {
+      "path": "backend/app/rate_limit.py",
+      "sha256": "77c41e9457b88d5134ac4ff64f540e2b220f623ded360a81572b0852f410eb80",
+      "bytes": 2714
+    },
+    {
+      "path": "backend/app/testing.py",
+      "sha256": "b137358009d574c301e85969848e1d45cd2d25b7b52dd04f7e6ca5a3ac3a30f5",
+      "bytes": 989
+    },
+    {
+      "path": "backend/requirements.txt",
+      "sha256": "1f630d7e3e3f218d38b4691c819bcec94e6f72d219b28c8e6165c255031043fc",
+      "bytes": 345
+    }
+  ],
+  "sourceOrigin": "D:/CODE/turtle-soup-clean-ts01-18b93182b3ff439eb9664d686491cf6b",
+  "pristineCommitAttested": false,
+  "productionStateAttested": false
+}

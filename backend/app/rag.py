@@ -12,6 +12,16 @@ import re
 from .schemas import Checkpoint, Soup
 
 
+def retrieve_candidates(question: str, soup: Soup, *, puzzle_version: str, limit: int = 8):
+    """Version-bound whole evidence only; it never chooses the host's answer.
+
+    Legacy match_user_query remains until TS-06's guarded decision integration;
+    new consumers must not turn a ranked candidate into a factual judgment.
+    """
+    from .host_evidence import retrieve_evidence
+    return retrieve_evidence(soup, question, puzzle_version=puzzle_version, limit=limit)
+
+
 @dataclass
 class MatchResult:
     match: bool = False

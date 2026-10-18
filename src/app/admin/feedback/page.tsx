@@ -1,25 +1,24 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { decodeFeedbackPage, decodeFeedbackReview, feedbackNeedsManualCorrection, FeedbackContractError, type Feedback, type FeedbackStatus } from '@/lib/feedback-contract';
+import AgentReviewPanel from '@/components/AgentReviewPanel';
+import MetricsPanel from '@/components/MetricsPanel';
 
-type FeedbackStatus = 'pending' | 'approved' | 'rejected';
-
-type Feedback = {
-  id: string;
-  ts: string;
-  soupId: string;
-  soupTitle: string | null;
-  question: string;
-  hostAnswer: string;
-  expectedAnswer: string;
-  reason: string | null;
-  status: FeedbackStatus;
-  reviewedAt: string | null;
-  mergedAt: string | null;
-  mergedAnswer: string | null;
-};
+function displayClaim(value: string): string {
+  return value.trim() ? value : '（仅空白，需人工核对）';
+}
 
 const ADMIN_TOKEN_KEY = 'turtle_admin_token';
+const ADMIN_TOKEN_EVENT = 'turtle-admin-token-changed';
+function savedAdminToken(): string {
+  if (typeof window === 'undefined') return '';
+  try { return localStorage.getItem(ADMIN_TOKEN_KEY) || ''; } catch { return ''; }
+}
+function subscribeAdminToken(listener: () => void): () => void {
+  window.addEventListener('storage', listener); window.addEventListener(ADMIN_TOKEN_EVENT, listener);
+  return () => { window.removeEventListener('storage', listener); window.removeEventListener(ADMIN_TOKEN_EVENT, listener); };
+}
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE !== undefined
     ? process.env.NEXT_PUBLIC_API_BASE
@@ -41,27 +40,38 @@ const STATUS_OPTIONS: { value: FeedbackStatus | ''; label: string }[] = [
 ];
 
 export default function AdminFeedbackPage() {
-  const [token, setToken] = useState('');
+  const token = useSyncExternalStore(subscribeAdminToken, savedAdminToken, () => '');
   const [inputToken, setInputToken] = useState('');
-  const [needToken, setNeedToken] = useState(false);
+  const needToken = !token;
   const [feedbacks, setFeedbacks] = useState<Feedback[]>([]);
+  const [loadedToken, setLoadedToken] = useState('');
   const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const activeRequest = useRef<AbortController | null>(null);
+  const activeReview = useRef<AbortController | null>(null);
+  const requestEpoch = useRef(0);
   const [error, setError] = useState('');
   const [soupFilter, setSoupFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<FeedbackStatus | ''>('');
+  const [tasksOpen, setTasksOpen] = useState(false);
 
-  async function load(t: string) {
-    setLoading(true);
-    setError('');
-    try {
-      const res = await fetch(`${API_BASE}/api/feedback/admin`, {
+  function load(t: string, cursor: string | null = null): Promise<void> {
+    activeRequest.current?.abort();
+    activeReview.current?.abort();
+    requestEpoch.current++;
+    const controller = new AbortController(); activeRequest.current = controller;
+    const current = () => activeRequest.current === controller && !controller.signal.aborted && savedAdminToken() === t;
+    const query = cursor === null ? '' : `?cursor=${encodeURIComponent(cursor)}`;
+    return fetch(`${API_BASE}/api/feedback/admin${query}`, {
         headers: { 'X-Admin-Token': t },
-      });
+        signal: controller.signal,
+      }).then(async res => {
+      if (!current()) return;
       if (res.status === 401) {
         localStorage.removeItem(ADMIN_TOKEN_KEY);
-        setToken('');
-        setNeedToken(true);
+        window.dispatchEvent(new Event(ADMIN_TOKEN_EVENT));
         setError('管理口令错误，请重新输入');
         return;
       }
@@ -69,71 +79,80 @@ export default function AdminFeedbackPage() {
         setError(`加载失败（${res.status}）`);
         return;
       }
-      const data = (await res.json()) as { total: number; feedbacks: Feedback[] };
-      setFeedbacks(data.feedbacks || []);
-      setTotal(data.total || 0);
-      setNeedToken(false);
-    } catch {
-      setError('网络错误，请确认后端已启动');
-    } finally {
-      setLoading(false);
-    }
+      const data = decodeFeedbackPage(await res.json());
+      if (!current()) return;
+      setFeedbacks(previous => {
+        if (cursor === null) return data.feedbacks;
+        const combined = new Map(previous.map(item => [item.id, item]));
+        for (const item of data.feedbacks) {
+          if (!combined.has(item.id) || combined.get(item.id)!.rowVersion <= item.rowVersion) combined.set(item.id, item);
+        }
+        return [...combined.values()];
+      });
+      setTotal(data.totalInRange); setNextCursor(data.nextCursor);
+      setLoadedToken(t);
+      setError('');
+    }).catch(error => {
+      if (current()) setError(error instanceof FeedbackContractError ? error.message : '网络错误，请确认后端已启动');
+    }).finally(() => {
+      if (current()) { setLoading(false); setReviewingId(null); }
+    });
   }
 
   useEffect(() => {
-    const saved = localStorage.getItem(ADMIN_TOKEN_KEY);
-    if (saved) {
-      setToken(saved);
-      load(saved);
-    } else {
-      setNeedToken(true);
-    }
-  }, []);
+    if (token) void load(token);
+    return () => { activeRequest.current?.abort(); activeReview.current?.abort(); };
+  }, [token]);
 
   function submitToken() {
     const v = inputToken.trim();
     if (!v) return;
     localStorage.setItem(ADMIN_TOKEN_KEY, v);
-    setToken(v);
-    load(v);
+    setLoading(true); setError('');
+    window.dispatchEvent(new Event(ADMIN_TOKEN_EVENT));
   }
 
   async function review(id: string, action: 'approve' | 'reject') {
-    if (!token) return;
+    if (!token || loadedToken !== token || reviewingId) return;
+    const item = feedbacks.find(item => item.id === id);
+    if (!item) return;
+    const controller = new AbortController(); activeReview.current = controller;
+    const epoch = requestEpoch.current;
+    const current = () => epoch === requestEpoch.current && activeReview.current === controller
+      && !controller.signal.aborted && savedAdminToken() === token;
+    setReviewingId(id);
     try {
       const res = await fetch(`${API_BASE}/api/feedback/admin/${id}/${action}`, {
         method: 'POST',
-        headers: { 'X-Admin-Token': token },
+        headers: { 'X-Admin-Token': token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expectedRowVersion: item.rowVersion }), signal: controller.signal,
       });
+      if (!current()) return;
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.detail || `${action === 'approve' ? '通过' : '拒绝'}失败`);
+        setError(res.status === 409 ? '这条反馈已被其他审核更新，请刷新后重新核对'
+          : res.status === 401 ? '管理口令已失效，请重新登录' : `${action === 'approve' ? '通过' : '拒绝'}失败（${res.status}）`);
         return;
       }
+      const updated = decodeFeedbackReview(await res.json(), id, item.rowVersion, action === 'approve' ? 'approved' : 'rejected');
+      if (!current()) return;
       setError('');
-      setFeedbacks((prev) =>
-        prev.map((f) =>
-          f.id === id
-            ? {
-                ...f,
-                status: action === 'approve' ? 'approved' : 'rejected',
-                reviewedAt: new Date().toISOString(),
-              }
-            : f
-        )
-      );
-    } catch {
-      setError('网络错误，操作失败');
+      setFeedbacks(previous => previous.map(row => row.id === id && row.rowVersion === item.rowVersion ? updated : row));
+    } catch (error) {
+      if (current()) setError(error instanceof FeedbackContractError ? error.message : '网络错误，操作失败');
+    } finally {
+      if (current()) setReviewingId(null);
     }
   }
 
+  const visibleFeedbacks = useMemo(() => loadedToken === token ? feedbacks : [], [feedbacks, loadedToken, token]);
+  const waiting = loading || (loadedToken !== token && !error);
   const titles = useMemo(
-    () => Array.from(new Set(feedbacks.map((f) => f.soupTitle || f.soupId))),
-    [feedbacks]
+    () => Array.from(new Set(visibleFeedbacks.map((f) => f.soupTitle || f.soupId))),
+    [visibleFeedbacks]
   );
 
   const shown = useMemo(() => {
-    let list = feedbacks;
+    let list = visibleFeedbacks;
     if (soupFilter) {
       list = list.filter((f) => (f.soupTitle || f.soupId) === soupFilter);
     }
@@ -141,11 +160,11 @@ export default function AdminFeedbackPage() {
       list = list.filter((f) => f.status === statusFilter);
     }
     return list;
-  }, [feedbacks, soupFilter, statusFilter]);
+  }, [visibleFeedbacks, soupFilter, statusFilter]);
 
   const pendingCount = useMemo(
-    () => feedbacks.filter((f) => f.status === 'pending').length,
-    [feedbacks]
+    () => visibleFeedbacks.filter((f) => f.status === 'pending').length,
+    [visibleFeedbacks]
   );
 
   function StatusBadge({ status, mergedAt }: { status: FeedbackStatus; mergedAt: string | null }) {
@@ -194,14 +213,14 @@ export default function AdminFeedbackPage() {
   }
 
   return (
-    <main className="mx-auto max-w-3xl px-4 py-8">
+    <main className="mx-auto w-full min-w-0 max-w-3xl px-4 py-8">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="font-display text-xl font-bold">反馈管理后台</h1>
           <p className="muted text-sm">
-            玩家提交的「主持人答错了」反馈 · 共 {total} 条
+            最近7天反馈 · 范围内 {loadedToken === token ? total : 0} 条 · 已加载 {visibleFeedbacks.length} 条
             {pendingCount > 0 && (
-              <span className="ml-2 text-accent-text">（{pendingCount} 条待审核）</span>
+              <span className="ml-2 text-accent-text">（已加载中 {pendingCount} 条待审核）</span>
             )}
           </p>
         </div>
@@ -229,15 +248,14 @@ export default function AdminFeedbackPage() {
               </option>
             ))}
           </select>
-          <button className="btn btn-ghost" onClick={() => load(token)} disabled={loading}>
-            {loading ? '刷新中…' : '刷新'}
+          <button className="btn btn-ghost" onClick={() => { setLoading(true); setError(''); void load(token); }} disabled={waiting || reviewingId !== null}>
+            {waiting ? '刷新中…' : '刷新'}
           </button>
           <button
             className="btn btn-ghost"
             onClick={() => {
               localStorage.removeItem(ADMIN_TOKEN_KEY);
-              setToken('');
-              setNeedToken(true);
+              window.dispatchEvent(new Event(ADMIN_TOKEN_EVENT));
             }}
           >
             退出
@@ -247,8 +265,10 @@ export default function AdminFeedbackPage() {
 
       {error && <p className="mt-3 text-sm text-danger-strong">{error}</p>}
 
+      <MetricsPanel adminToken={token} />
+
       <div className="mt-4 space-y-3">
-        {shown.length === 0 && !loading && (
+        {shown.length === 0 && !waiting && (
           <div className="card p-6 text-center muted">
             {statusFilter || soupFilter ? '没有符合条件的反馈。' : '还没有玩家提交反馈。'}
           </div>
@@ -257,8 +277,9 @@ export default function AdminFeedbackPage() {
           <div key={f.id} className="card p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="badge">{f.soupTitle || f.soupId}</span>
+                <span className="badge">{f.soupTitle || displayClaim(f.soupId)}</span>
                 <StatusBadge status={f.status} mergedAt={f.mergedAt} />
+                <span className="muted text-xs">审核版本：{f.rowVersion}</span>
               </div>
               <span className="muted text-xs">{fmtTime(f.ts)}</span>
             </div>
@@ -266,15 +287,15 @@ export default function AdminFeedbackPage() {
             <dl className="mt-3 space-y-2 text-sm">
               <div>
                 <dt className="muted inline">玩家问：</dt>
-                <dd className="inline">{f.question}</dd>
+                <dd className="inline">{displayClaim(f.question)}</dd>
               </div>
               <div>
                 <dt className="muted inline">主持人答：</dt>
-                <dd className="inline">{f.hostAnswer}</dd>
+                <dd className="inline">{displayClaim(f.hostAnswer)}</dd>
               </div>
               <div>
-                <dt className="text-accent inline">正确答案应为：</dt>
-                <dd className="inline">{f.expectedAnswer}</dd>
+                <dt className="text-accent inline">玩家认为应答：</dt>
+                <dd className="inline">{displayClaim(f.expectedAnswer)}</dd>
               </div>
               {f.mergedAnswer && (
                 <div>
@@ -302,17 +323,23 @@ export default function AdminFeedbackPage() {
               )}
             </dl>
 
-            {f.status === 'pending' && (
+            {feedbackNeedsManualCorrection(f) && <p className="mt-3 text-sm text-danger-strong">
+              必填内容仅空白：原历史记录已保留，可拒绝处理，不能通过或授权模型使用。
+            </p>}
+
+            {(f.status === 'pending' || (feedbackNeedsManualCorrection(f) && f.status !== 'rejected')) && (
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   className="btn btn-solid bg-success text-white hover:bg-success/90"
                   onClick={() => review(f.id, 'approve')}
+                  disabled={reviewingId !== null || feedbackNeedsManualCorrection(f)}
                 >
                   通过 ✅
                 </button>
                 <button
                   className="btn btn-ghost border-danger/30 text-danger hover:bg-danger/10"
                   onClick={() => review(f.id, 'reject')}
+                  disabled={reviewingId !== null}
                 >
                   拒绝 ❌
                 </button>
@@ -321,6 +348,13 @@ export default function AdminFeedbackPage() {
           </div>
         ))}
       </div>
+      {loadedToken === token && nextCursor && <button className="btn btn-ghost mt-4" disabled={waiting || reviewingId !== null}
+        onClick={() => { setLoading(true); setError(''); void load(token, nextCursor); }}>加载更多</button>}
+      <button className="btn btn-ghost mt-4" disabled={loadedToken !== token} aria-expanded={tasksOpen}
+        onClick={() => setTasksOpen(previous => !previous)}>{tasksOpen ? '关闭任务管理' : '打开任务管理'}</button>
+      {tasksOpen && loadedToken === token && <AgentReviewPanel token={token} feedbacks={visibleFeedbacks}
+        onFeedbackChanged={updated => setFeedbacks(previous => previous.map(item => item.id === updated.id
+          && item.rowVersion < updated.rowVersion ? updated : item))} />}
     </main>
   );
 }

@@ -1,0 +1,15 @@
+# A13–A17 游戏幂等/失败恢复逐断言核查
+
+2026-10-15，只读审计，不迁移/查询真实玩家数据库。依据原验收清单A13–A17，不修改原勾选。
+
+证据：[Task1完整XML](../.cache/a46/task1-whole.xml)实际2987/0failure/0error/14skip，SHA f2cf5674b4fae5bf91151adf2f64b583f2bef1b5833fb5d6695e5182022dabd4；该版本394/432ea586…的完整源身份。此四组在该实际运行内全部通过：game_transactions21、turn_failure_recovery23、game_request_recovery5、request_disconnect2，共51（已在2973backend内，不相加）。当前逐文件复核game_store/game_service及这四个test文件均同当时摘要，未重跑已验证项。
+
+当前检查点：A46四个本地任务及唯一Banach审查后一次修复已结束，冻结398源身份55462476961a9a33cca6fba244bc89b8d44a5c357ab0c1e04e7ddb046f16fc32。当前[完整XML](../.cache/a46/review-final.xml) SHA d297ae1a7a0628f0c1e9120ffcc510086c4cedaa3b21c65aebd10cb94f78ba90，实际3014backend PASS/14原skip，连同395frontend+103Node+3API共3515离线PASS，另owned Edge35 PASS；此处是已运行回执读回，不是本轮重跑。本页五组game_transactions21/turn_failure_recovery23/game_request_recovery5/request_disconnect2/evaluation_state_gate3，共54当前XML全通过，逐文件同冻结摘要；此前394/3474仍只作为历史。以下不认证真实provider或生产恢复。
+
+- **A13**：reserve_turn先查询session+requestId及payload_hash。同ID同问题返回原reserved/completed/failed，异问题turn_payload_conflict；首次插入turn才占位。tests/game_transactions的同ID/并发不同ID行为明确验证只有一个reserved；turn_failure_recovery的linked pair/最后计次以相同文本的新UUID实际问两次保留两对消息，不去重玩家有意重复。
+- **A14**：finish_turn以严格HostResult.kind/chargeable决定计次，reminder/system_error count0，失败终态相同ID复用。90秒业务lease在189.99不回收、190回收一次且再回收0；晚到旧win/token/row_version/question/p1/engine/status变更都不能写消息、次数或通关。request_disconnect实际断开留下failed/cancelled/次数0，同时model gateway.active1，后续真实释放才回收；不把业务lease恢复当模型worker/远程推理已结束。
+- **A15**：API丢失成功/失败响应测试使用真实FakeModel+TestClient，同ID再次POST与GET得到完全相同content/status，model calls和计数没有增加；异问题409、跨session查询404、坏UUID422。get_turn_response/再次reserve过期owner均原失败重放、不重新派发。
+- **A16**：有在途时真实API额外问题/揭晓各409；terminal solved/given_up/expired不可新reserve；win的solved/solved_at已在turn_failure_recovery真实断言。补充061f40实际读取test_evaluation_state_gate完整三测试及Task1 XML单项：win_stays_solved_after_reveal_and_original_win_request_replays实际先POST问答获得win、再POST evaluate成功，查session仍solved/givenUpAt=None/questionsAsked=1，原问答重放content一致；另两项真实重复/并发揭晓只保存一份evaluation，given_up后拒绝新问题。三个XML单项均无failure/error/skip。be9e4b核test文件SHA930b1ca3bcaf0a449c3286dd843a7a45545a862ca6466b4944fb180f77edab6e、game_store 6dcd049…/game_service df539a…均同Task1394记录，补齐前次未核映射，不靠源码条件猜通过。三个成绩在2973内（本页明确映射共54），不叠加总分或认证生产强杀/新完整项目。
+- **A17**：真实SQLite连接代理在user/host消息、session/turn UPDATE、commit共5位置注入OperationalError，完整iterdump保持原样，正常重试仍一对消息/一次计数；legacy单消息/status writer拒绝atomic_writer_required。finish_turn同短_transaction内写配对messages/计次/turn与业务审计；game_service在reserve已结束后再调用host。真实阻塞FakeModel测试能从另一连接BEGIN IMMEDIATE并回滚，证明模型等待不持写事务，不是靠grep或Mock吞事务。
+
+暂不能据此保证强杀/断电/实际生产所有写入者或provider远端取消；真实生产停写与迁移另HOLD。其它A条目不自动通过；原18阶段/A60/C24/IR24/OV+SG范围继续保留。A46本地工程已关闭但真实三系统模型比较、人审及原目标总验收未完成，不因本页证据就结束总目标。

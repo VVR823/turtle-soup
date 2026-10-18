@@ -1,0 +1,9 @@
+# Legacy pip compatibility entry; not the reproducibility source of truth.
+# Python >=3.11,<3.14. Use pyproject.toml + uv.lock and `uv sync --locked`.
+# This list preserves old deployment tooling while TS-17 is not implemented.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+pydantic>=2,<3
+python-dotenv==1.2.3
+httpx==0.28.1
+langchain-openai==1.6.0

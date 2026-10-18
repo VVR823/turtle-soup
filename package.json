@@ -6,7 +6,18 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:frontend": "vitest run",
+    "test:backend": "node scripts/test-backend.mjs",
+    "test:harness": "node --test scripts/tests/fixture-process.test.mjs scripts/tests/frontend-build-policy.test.mjs scripts/tests/lint-boundary.test.mjs scripts/tests/ui-server-policy.test.mjs scripts/tests/ui-frontend-process.test.mjs scripts/tests/backend-release-policy.test.mjs scripts/tests/backend-release-smoke.test.mjs scripts/tests/standalone-input-policy.test.mjs scripts/tests/standalone-build-policy.test.mjs scripts/tests/standalone-release-policy.test.mjs scripts/tests/standalone-release-smoke.test.mjs scripts/tests/container-context-policy.test.mjs",
+    "test:e2e": "node scripts/e2e-server.mjs",
+    "test:ui": "node scripts/ui-e2e-server.mjs",
+    "test:offline": "npm run test:backend && npm run test:frontend && npm run test:harness && npm run test:e2e",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.17.0 <23"
   },
   "dependencies": {
     "autoprefixer": "^10.5.4",
@@ -17,14 +28,20 @@
     "uuid": "^14.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@tailwindcss/postcss": "^4.3.3",
-    "@types/node": "^20",
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "22.20.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "6.1.2",
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
+    "jsdom": "29.1.1",
     "tailwindcss": "^4.3.3",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "5.0.3"
   }
 }

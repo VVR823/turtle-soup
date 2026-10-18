@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """旅馆汤 QA 回归（10 题，源自 test_hotel_qa.py）。"""
+import pytest
+
 from .conftest import run_qa
 
 SOUP_ID = "hotel"
@@ -18,6 +20,7 @@ QA = [
 ]
 
 
+@pytest.mark.real_model
 def test_hotel_full_qa(client):
     hard, _ = run_qa(client, SOUP_ID, QA)
     assert not hard, f"硬错误 {len(hard)} 个: {hard[:5]}"

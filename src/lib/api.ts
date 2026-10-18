@@ -117,14 +117,59 @@ export class ApiAuthError extends Error {
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const token = getSiteToken();
   const headers = new Headers(init.headers);
-  if (token) headers.set('X-Site-Token', token);
+  if (token && !headers.has('X-Site-Token')) headers.set('X-Site-Token', token);
   if (!headers.has('Content-Type') && (init.method || 'GET') !== 'GET') {
     headers.set('Content-Type', 'application/json');
   }
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (res.status === 401) {
-    clearSiteToken();
+    // A late response only owns the credential actually sent, not a newly
+    // verified token or a different stored token during a prospective check.
+    if (getSiteToken() === (headers.get('X-Site-Token') || '')) clearSiteToken();
     throw new ApiAuthError();
   }
   return res;
+}
+
+export class ApiProtocolError extends Error {
+  constructor() { super('服务返回的数据暂时无法读取，请同步原对局'); this.name = 'ApiProtocolError'; }
+}
+
+export class ApiHttpError extends Error {
+  constructor(public readonly status: number, public readonly code: string | null,
+    public readonly requestId: string | null, public readonly retryAfterSeconds: number | null) {
+    super(({ 404: '保存的对局或请求不存在', 410: '这局旧游戏暂时无法恢复，历史仍保留',
+      409: '对局状态已变化，请同步后再操作', 429: '请求较多，请稍后同步', 503: '服务暂时不可用，请稍后同步' } as Record<number, string>)[status]
+      || `请求失败（${status}），请保留原对局并重试`);
+    this.name = 'ApiHttpError';
+  }
+}
+
+export interface ApiJsonResponse { status: number; ok: boolean; body: unknown; headers: Headers }
+
+export async function apiResponseJson(path: string, init: RequestInit = {}): Promise<ApiJsonResponse> {
+  const response = await apiFetch(path, init);
+  let body: unknown;
+  try { body = await response.json(); } catch {
+    if (!response.ok) throw httpError({ status: response.status, ok: false, body: null, headers: response.headers });
+    throw new ApiProtocolError();
+  }
+  return { status: response.status, ok: response.ok, body, headers: response.headers };
+}
+
+export function httpError(response: ApiJsonResponse): ApiHttpError {
+  const body = response.body && typeof response.body === 'object' && !Array.isArray(response.body)
+    ? response.body as Record<string, unknown> : {};
+  const raw = response.headers.get('Retry-After');
+  const seconds = !raw ? null : /^\d+(?:\.\d+)?$/.test(raw) ? Math.ceil(Number(raw))
+    : Number.isFinite(Date.parse(raw)) ? Math.max(0, Math.ceil((Date.parse(raw) - Date.now()) / 1000)) : null;
+  return new ApiHttpError(response.status, typeof body.code === 'string' ? body.code : null,
+    typeof body.requestId === 'string' ? body.requestId : null,
+    seconds !== null && Number.isSafeInteger(seconds) ? seconds : null);
+}
+
+export async function apiJson(path: string, init: RequestInit = {}): Promise<unknown> {
+  const response = await apiResponseJson(path, init);
+  if (!response.ok) throw httpError(response);
+  return response.body;
 }

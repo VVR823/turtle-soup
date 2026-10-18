@@ -5,8 +5,9 @@
 limitReached / keyPointsCovered / keyPointsMissing）保持一致，前端无需改动字段名。
 """
 from typing import List, Literal, Optional, Union
+from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
 
 # 主持人 5 种标准回答
 AnswerType = Literal["是", "不是", "是也不是", "算是", "与此无关"]
@@ -19,13 +20,87 @@ class HostJudgment(BaseModel):
     也方便把 reasoning 与 answer 分离（answer 用于回复，reasoning 仅供调试）。
     """
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
     reasoning: str = Field(
+        max_length=1000,
         description="基于完整汤底事实的简短内部推理；只能引用汤底真相，不得向玩家透露汤底细节"
     )
     answer: AnswerType = Field(
         description="最终判定，只能从以下选一：是、不是、是也不是、算是、与此无关"
     )
+
+
+HostKind = Literal["answer", "reminder", "system_error", "win"]
+HostSource = Literal["deterministic", "llm", "flow", "legacy"]
+ModelErrorCode = Literal[
+    "model_timeout", "model_busy", "model_unavailable", "model_output_invalid",
+    "model_policy_unknown", "model_auth", "model_quota", "model_transport_error",
+    "model_cancelled", "model_cleanup_failed", "context_too_large",
+]
+
+
+HOST_ENGINE_VERSION = "host-v3"
+
+
+class HostVersions(BaseModel):
+    """Program-owned versions; the provider cannot select these."""
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    puzzleVersion: str = Field(default="unversioned", min_length=1)
+    ruleVersion: str = Field(default="unversioned", min_length=1)
+    engineVersion: str = Field(default=HOST_ENGINE_VERSION, min_length=1)
+    normalizationVersion: str = Field(default="exact-v1", min_length=1)
+
+
+class HostResult(BaseModel):
+    """Authoritative business decision; display text grants no permissions."""
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+    kind: HostKind
+    answer: Optional[AnswerType] = None
+    chargeable: bool
+    source: HostSource
+    evidenceIds: tuple[str, ...] = ()
+    cacheHit: bool = False
+    contextIndependent: bool = False
+    versions: HostVersions = Field(default_factory=HostVersions)
+    errorCode: Optional[ModelErrorCode] = None
+    reply: str = Field(min_length=1, max_length=2000)
+    matchedCheckpoint: Optional[str] = None
+
+    @model_validator(mode="after")
+    def consistent_decision(self):
+        if self.kind == "answer":
+            valid = self.answer is not None and self.chargeable and self.errorCode is None
+            valid = valid and self.source in {"deterministic", "llm", "legacy"}
+        elif self.kind == "system_error":
+            valid = self.answer is None and not self.chargeable and self.errorCode is not None
+            valid = valid and self.source in {"llm", "flow"}
+        elif self.kind == "reminder":
+            valid = self.answer is None and not self.chargeable and self.errorCode is None
+            valid = valid and self.source in {"deterministic", "flow"}
+        else:
+            valid = self.answer is None and self.errorCode is None and self.source == "deterministic"
+        if not valid:
+            raise ValueError("Inconsistent host decision")
+        return self
+
+    def __getitem__(self, name):
+        # Temporary compatibility for existing internal host tests/scripts.
+        # No permissive provider dict conversion is provided.
+        aliases = {
+            "is_reveal": self.kind == "win", "is_giveup": False,
+            "is_win": self.kind == "win", "matched_checkpoint": self.matchedCheckpoint,
+        }
+        if name in aliases:
+            return aliases[name]
+        if name in type(self).model_fields:
+            return getattr(self, name)
+        raise KeyError(name)
+
+    def get(self, name, default=None):
+        try:
+            return self[name]
+        except KeyError:
+            return default
 
 
 class Checkpoint(BaseModel):
@@ -41,7 +116,7 @@ class ConfusionPoint(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     q: str  # 展示用坑点描述
     a: AnswerType  # 确定性标答
-    match: Optional[List[str]] = None  # 触发正则（任一命中即锁定）
+    match: Optional[List[str]] = None  # 旧诊断/检索提示；正则不授予在线答案权限
     note: Optional[str] = None
 
 
@@ -103,11 +178,31 @@ class Soup(BaseModel):
 
 
 # ===================== 请求 / 响应 =====================
+class RequestSceneError(ValueError):
+    """A well-typed body does not describe either supported chat scene."""
+
+
 class ChatRequest(BaseModel):
-    soupId: Optional[str] = None
-    sessionId: Optional[str] = None
-    question: Optional[str] = None
-    level: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
+    soupId: Optional[StrictStr] = Field(default=None, min_length=1, max_length=200)
+    sessionId: Optional[StrictStr] = Field(default=None, min_length=1, max_length=200)
+    question: Optional[StrictStr] = Field(default=None, min_length=1, max_length=500)
+    level: Optional[StrictStr] = Field(default=None, max_length=50)
+    requestId: UUID = Field(default_factory=uuid4)
+
+    @field_validator("question", mode="before")
+    @classmethod
+    def trim_question(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    def scene(self) -> Literal["create", "ask"]:
+        if self.sessionId is None:
+            if self.soupId is None or self.question is not None:
+                raise RequestSceneError("Invalid create scene")
+            return "create"
+        if self.question is None or "level" in self.model_fields_set:
+            raise RequestSceneError("Invalid ask scene")
+        return "ask"
 
 
 class ChatCreateResponse(BaseModel):
@@ -116,6 +211,7 @@ class ChatCreateResponse(BaseModel):
     sessionId: str
     questionLimit: Optional[int] = None
     unlocks: Optional[str] = None  # 本汤通关后解锁的隐藏彩蛋汤 id
+    requestId: Optional[str] = None
 
 
 class ChatReplyResponse(BaseModel):
@@ -127,10 +223,15 @@ class ChatReplyResponse(BaseModel):
     remaining: Optional[int] = None
     limitReached: bool = False
     isFreeReminder: bool = False
+    requestId: Optional[str] = None
+    turnId: Optional[str] = None
+    kind: Optional[HostKind] = None
+    state: Optional[Literal["reserved", "completed", "failed", "expired"]] = None
 
 
 class EvaluateRequest(BaseModel):
-    sessionId: str
+    model_config = ConfigDict(extra="forbid")
+    sessionId: StrictStr = Field(min_length=1, max_length=200)
 
 
 class EvaluationResult(BaseModel):
@@ -140,6 +241,20 @@ class EvaluationResult(BaseModel):
     keyPointsMissing: List[str] = []
     bottom: str = ""
     unlockSoupId: Optional[str] = None  # 通关后解锁的隐藏彩蛋汤 id
+    verifiedCoverage: StrictInt | None = Field(default=None, ge=0, le=100)
+    reconstructionScore: None = None
+    scoreVersion: Literal["coverage-v1"] | None = None
+    plotProgress: StrictInt | None = Field(default=None, ge=0, le=100)
+    unknownTopics: List[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def consistent_score(self):
+        if self.scoreVersion == "coverage-v1":
+            if self.verifiedCoverage is None or self.completion != self.verifiedCoverage:
+                raise ValueError("New completion must equal verified coverage")
+        elif self.verifiedCoverage is not None or self.plotProgress is not None or self.unknownTopics:
+            raise ValueError("Unversioned legacy scores cannot claim new measurements")
+        return self
 
 
 class FeedbackSubmit(BaseModel):
@@ -147,11 +262,28 @@ class FeedbackSubmit(BaseModel):
 
     字段顺序即前端表单顺序：先选汤，再填问的问题、主持人回答、应得正确答案、理由(选填)。
     """
-    soupId: str  # 选中的汤 id（对应 /api/soups 返回的 id）
-    question: str  # 玩家问的问题是什么
-    hostAnswer: str  # 主持人实际回答的是什么
-    expectedAnswer: str  # 玩家认为正确答案应该是什么
-    reason: Optional[str] = None  # 理由（选填）
+    model_config = ConfigDict(extra="forbid")
+    soupId: StrictStr = Field(min_length=1, max_length=200)
+    question: StrictStr = Field(min_length=1, max_length=500)
+    hostAnswer: StrictStr = Field(min_length=1, max_length=100)
+    expectedAnswer: StrictStr = Field(min_length=1, max_length=100)
+    reason: Optional[StrictStr] = Field(default=None, max_length=2000)
+    turnId: Optional[StrictStr] = Field(default=None, min_length=36, max_length=36,
+        pattern=r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+
+    @field_validator("question", mode="before")
+    @classmethod
+    def trim_question(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+    @field_validator("soupId", "hostAnswer", "expectedAnswer")
+    @classmethod
+    def nonblank_feedback_required_fields(cls, value):
+        if not value.strip():
+            raise ValueError("Required feedback fields must contain meaningful text")
+        # Preserve original meaningful claims, including surrounding whitespace.
+        return value
 
 
 class FeedbackRecord(BaseModel):

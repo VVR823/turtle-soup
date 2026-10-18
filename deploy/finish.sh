@@ -22,7 +22,7 @@ Description=Turtle Soup Backend (FastAPI)
 After=network.target
 [Service]
 WorkingDirectory=/opt/turtle-soup/backend
-ExecStart=/opt/turtle-soup/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/turtle-soup/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 Restart=always
 User=root
 [Install]

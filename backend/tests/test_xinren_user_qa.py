@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """「新人」用户补充 QA（18 题，源自 tests/online/test_xinren_user_qa.py）。"""
+import pytest
+
 from .conftest import run_qa
 
 SOUP_ID = "xinren"
@@ -26,6 +28,7 @@ QA = [
 ]
 
 
+@pytest.mark.real_model
 def test_xinren_user_full_qa(client):
     hard, _ = run_qa(client, SOUP_ID, QA)
     assert not hard, f"硬错误 {len(hard)} 个: {hard[:5]}"

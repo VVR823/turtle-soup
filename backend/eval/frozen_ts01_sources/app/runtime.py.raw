@@ -1,0 +1,74 @@
+"""App-local state carried across ASGI and FastAPI's copied thread context.
+
+factory -> lifespan initializes Runtime -> request context -> short DB operations
+                                            -> isolated cache / model / limiter
+shutdown -> close owned transports; reset context, never mutate another instance
+"""
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from threading import RLock
+from typing import Any
+from uuid import uuid4
+
+from .config import Settings, load_settings
+
+_current: ContextVar["Runtime | None"] = ContextVar("turtle_soup_runtime", default=None)
+_standalone: "Runtime | None" = None
+_standalone_lock = RLock()
+
+
+@dataclass
+class Runtime:
+    settings: Settings
+    model: Any = None
+    soups: Any = None
+    host_cache: dict = field(default_factory=dict)
+    llm_cache: dict = field(default_factory=dict)
+    lock: Any = field(default_factory=RLock)
+    http_client: Any = None
+    http_async_client: Any = None
+    limiter: Any = None
+    initialized: bool = False
+    instance_id: str = field(default_factory=lambda: str(uuid4()))
+    closed: bool = False
+
+    def __post_init__(self):
+        if self.soups is not None:
+            self.soups = [s.model_copy(deep=True) for s in self.soups]
+        from .rate_limit import SlidingWindowLimiter
+        self.limiter = SlidingWindowLimiter()
+
+    async def aclose(self):
+        try:
+            try:
+                if self.http_client is not None:
+                    self.http_client.close()
+            finally:
+                if self.http_async_client is not None:
+                    await self.http_async_client.aclose()
+        finally:
+            self.llm_cache.clear()
+            self.host_cache.clear()
+            self.closed = True
+
+
+def get_runtime() -> Runtime:
+    active = _current.get()
+    if active is not None:
+        return active
+    # Legacy explicitly invoked CLI functions still work. Import never gets here.
+    global _standalone
+    with _standalone_lock:
+        if _standalone is None:
+            _standalone = Runtime(load_settings())
+        return _standalone
+
+
+@contextmanager
+def runtime_context(runtime: Runtime):
+    token = _current.set(runtime)
+    try:
+        yield runtime
+    finally:
+        _current.reset(token)

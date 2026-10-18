@@ -1,22 +1,13 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { API_BASE, apiFetch, clearSiteToken, ApiAuthError, getUnlockedSoups, getPlayedSoups } from '@/lib/api';
+import { getPlayedSoups } from '@/lib/api';
+import { loadPublicCatalog, type PublicSoup } from '@/lib/catalog';
 import {
-  TurtleIcon, SearchIcon, GiftIcon, CloseIcon, ArrowRightIcon, ArrowLeftIcon, CoffeeIcon,
+  SearchIcon, GiftIcon, CloseIcon, ArrowRightIcon, ArrowLeftIcon, CoffeeIcon,
 } from '@/components/icons';
 
-interface Soup {
-  id: string;
-  title: string;
-  surface: string;
-  bottom?: string;
-  tags: string[];
-  difficulty: number;
-  source?: string;
-  hidden?: boolean;
-  unlimited?: boolean;
-}
+type Soup = PublicSoup;
 
 /** 难度星级 */
 function DifficultyStars({ level }: { level: number }) {
@@ -188,11 +179,8 @@ function Pagination({
   currentPage: number;
   onPageChange: (p: number) => void;
 }) {
-  const [input, setInput] = useState(String(currentPage));
-
-  useEffect(() => {
-    setInput(String(currentPage));
-  }, [currentPage]);
+  const [draft, setDraft] = useState<{ page: number; value: string } | null>(null);
+  const input = draft?.page === currentPage ? draft.value : String(currentPage);
 
   const handleJump = () => {
     const p = parseInt(input, 10);
@@ -233,7 +221,7 @@ function Pagination({
           min={1}
           max={totalPages}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => setDraft({ page: currentPage, value: e.target.value })}
           onKeyDown={(e) => {
             if (e.key === 'Enter') handleJump();
           }}
@@ -261,6 +249,7 @@ const PAGE_SIZE = 6;
 export default function Home() {
   const [soups, setSoups] = useState<Soup[]>([]);
   const [loading, setLoading] = useState(true);
+  const [catalogError, setCatalogError] = useState('');
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(1);
   const [showDonate, setShowDonate] = useState(false);
@@ -297,30 +286,17 @@ export default function Home() {
     const controller = new AbortController();
     soupsAbortRef.current = controller;
     setLoading(true);
+    setCatalogError('');
     try {
-      const unlocked = getUnlockedSoups().join(',');
-      const params = new URLSearchParams();
-      if (q) params.set('q', q);
-      if (unlocked) params.set('unlocked', unlocked);
-      const url = `/api/soups${params.toString() ? `?${params.toString()}` : ''}`;
-      const res = await apiFetch(url, { signal: controller.signal });
-      const data = await res.json();
-      if (data.soups && Array.isArray(data.soups)) {
-        setSoups(data.soups);
-        setPlayed(new Set(getPlayedSoups()));
-      }
+      const list = await loadPublicCatalog({ query: q, signal: controller.signal });
+      if (soupsAbortRef.current !== controller || controller.signal.aborted) return;
+      setSoups(list); setPlayed(new Set(getPlayedSoups()));
     } catch (err) {
-      if (err instanceof ApiAuthError) {
-        clearSiteToken();
-        window.location.reload();
-        return;
-      }
-      // 主动取消的旧请求不算错误，直接忽略
-      if (err instanceof DOMException && err.name === 'AbortError') return;
-      console.error('获取汤品列表失败:', err);
+      if (soupsAbortRef.current !== controller || controller.signal.aborted) return;
+      setCatalogError(err instanceof Error ? err.message : '列表加载失败，请重试');
     } finally {
       // 只有当前请求才允许关闭 loading（被取消的旧请求不应影响新请求的加载状态）
-      if (soupsAbortRef.current === controller) setLoading(false);
+      if (soupsAbortRef.current === controller && !controller.signal.aborted) setLoading(false);
     }
   }
 
@@ -377,6 +353,8 @@ export default function Home() {
 
       {/* 主内容 */}
       <main className="relative mx-auto max-w-5xl px-6 py-10">
+        {catalogError && <div className="panel p-5"><p role="alert">{catalogError}</p>
+          <button className="btn btn-ghost mt-3" onClick={() => void fetchSoups(query)}>重试列表</button></div>}
         {loading && (
           <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3" aria-hidden="true">
             {Array.from({ length: 6 }, (_, i) => (
@@ -403,14 +381,14 @@ export default function Home() {
           </div>
         )}
 
-        {!loading && soups.length === 0 && !query && (
+        {!loading && !catalogError && soups.length === 0 && !query && (
           <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border py-20 text-center">
             <p className="text-xl text-fg-muted">暂时没有海龟汤哦~</p>
             <p className="mt-1 text-sm text-fg-subtle">等待管理员添加新题</p>
           </div>
         )}
 
-        {!loading && soups.length === 0 && query && (
+        {!loading && !catalogError && soups.length === 0 && query && (
           <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border py-20 text-center">
             <p className="text-xl text-fg-muted">
               没有找到与「{query}」相关的海龟汤
@@ -419,7 +397,7 @@ export default function Home() {
           </div>
         )}
 
-        {!loading && soups.length > 0 && (
+        {!loading && !catalogError && soups.length > 0 && (
           <>
             {query && (
               <p className="mb-4 text-sm text-fg-subtle">
@@ -461,7 +439,7 @@ export default function Home() {
       <footer className="relative border-t border-border/60 py-8 text-center text-sm text-fg-subtle">
         许二木海龟汤自助 · AI 主持的海龟汤推理游戏
         <p className="mt-2 text-xs text-fg-subtle/70">
-          每晚 0:00 系统自动更新答题规则，约几秒短暂不可用，期间提问请稍后重试~
+          答题规则经人工审核后发布；提问暂时失败时，请稍后重试~
         </p>
         <div className="mt-3">
           <button

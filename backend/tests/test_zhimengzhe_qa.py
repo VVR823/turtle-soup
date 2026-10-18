@@ -3,6 +3,8 @@
 
 织梦者主持人对"是"类有时回复"……是"（如"嗯，是"），故启用 loose_is。
 """
+import pytest
+
 from .conftest import run_qa
 
 SOUP_ID = "zhimengzhe"
@@ -28,6 +30,7 @@ QA = [
 ]
 
 
+@pytest.mark.real_model
 def test_zhimengzhe_full_qa(client):
     hard, _ = run_qa(client, SOUP_ID, QA, loose_is=True)
     assert not hard, f"硬错误 {len(hard)} 个: {hard[:5]}"

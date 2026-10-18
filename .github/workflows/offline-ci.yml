@@ -1,0 +1,56 @@
+name: Offline test gate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    # Zero-paid-cost policy: never consume private-repository minutes implicitly.
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.12', '3.13']
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/backend/.venv-ts01
+      UV_CACHE_DIR: ${{ github.workspace }}/.cache/uv
+      LANGSMITH_TRACING: 'false'
+      LANGCHAIN_TRACING_V2: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install uv==0.12.3
+      - run: uv sync --project backend --locked --group dev --python python --no-managed-python
+      - run: uv run --project backend --offline --no-sync python -m pytest --junitxml=.cache/ts01/pytest.xml
+
+  full-offline-entry:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-latest
+    env:
+      UV_PROJECT_ENVIRONMENT: ${{ github.workspace }}/backend/.venv-ts01
+      UV_CACHE_DIR: ${{ github.workspace }}/.cache/uv
+      LANGSMITH_TRACING: 'false'
+      LANGCHAIN_TRACING_V2: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - run: python -m pip install uv==0.12.3
+      - run: uv sync --project backend --locked --group dev --python python --no-managed-python
+      - run: npm ci --ignore-scripts
+      # API-only Playwright tests need no downloaded browser or real model key.
+      - run: npm run test:offline
+      - run: npm run typecheck
