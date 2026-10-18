@@ -10,6 +10,8 @@
 """
 import pytest
 
+from app.soups import SEED_SOUPS
+
 
 def _create_limit(client, soup_id: str, level=None):
     """创建一个会话并返回 questionLimit（不传 level 时 body 里完全不带该字段）。"""
@@ -46,3 +48,13 @@ def test_unlimited_egg_soup_unaffected(client):
     """彩蛋汤 unlimited=True，不受难度兜底影响，仍为不限次(None)。"""
     assert _create_limit(client, "xinshijie", "abc") is None
     assert _create_limit(client, "xinshijie", None) is None
+
+
+def test_all_limited_soup_question_limits_are_multiples_of_five():
+    invalid = {
+        soup["id"]: soup["difficultyLimits"]
+        for soup in SEED_SOUPS
+        if not soup.get("unlimited")
+        and any(limit % 5 for limit in soup["difficultyLimits"].values())
+    }
+    assert invalid == {}
