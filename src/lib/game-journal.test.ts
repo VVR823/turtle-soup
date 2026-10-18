@@ -78,6 +78,15 @@ describe('durable owned operation journal', () => {
     expect(newRequestId()).toMatch(/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
     expect(newRequestId()).not.toBe(newRequestId());
   });
+  it('generates a secure UUID when an HTTP browser omits randomUUID', () => {
+    vi.stubGlobal('crypto', {
+      getRandomValues: (bytes: Uint8Array) => {
+        bytes.set(Array.from({ length: bytes.length }, (_, index) => index));
+        return bytes;
+      },
+    });
+    expect(newRequestId()).toBe('00010203-0405-4607-8809-0a0b0c0d0e0f');
+  });
   it('reports unsupported browser UUID generation without an unsafe fallback', () => {
     vi.stubGlobal('crypto', {});
     expect(() => newRequestId()).toThrow('编号');
