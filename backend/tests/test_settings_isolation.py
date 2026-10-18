@@ -121,6 +121,7 @@ def test_windows_namespace_normalization_without_io():
     assert _strip_windows_namespace("\\\\.\\D:\\synthetic") == "D:\\synthetic"
     assert _strip_windows_namespace("\\\\?\\UNC\\server\\share") == "\\\\server\\share"
     assert _strip_windows_namespace("\\\\.\\nul") == "\\\\.\\NUL"
+    assert _strip_windows_namespace("\\\\.\\nul\\") == "\\\\.\\NUL"
     with pytest.raises(ValueError, match="namespace"):
         _strip_windows_namespace("\\\\?\\GLOBALROOT\\Device\\synthetic")
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 def _strip_windows_namespace(value: str) -> str:
     # pathlib resolves os.devnull to a device; pytest's log sink needs it.
-    if value.lower() == "\\\\.\\nul":
+    if value.rstrip("\\/").lower() == "\\\\.\\nul":
         return "\\\\.\\NUL"
     if value[:8].lower() == "\\\\?\\unc\\":
         return "\\\\" + value[8:]
