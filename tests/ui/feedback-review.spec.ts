@@ -21,7 +21,7 @@ test('blank answer feedback is rejected over HTTP without poisoning subsequent a
   const card = page.locator('div.card').filter({ hasText: question });
   await expect(card.getByText('审核版本：0', { exact: true })).toBeVisible();
   const reviewed = page.waitForResponse(r => r.url() === `${API}/api/feedback/admin/${id}/approve`);
-  await card.getByRole('button', { name: '通过 ✅', exact: true }).click();
+  await card.getByRole('button', { name: '确认反馈有效', exact: true }).click();
   const response = await reviewed;
   expect(response.ok()).toBeTruthy();
   expect((await response.json()).feedback.safeForModel).toBe(false);
@@ -48,7 +48,7 @@ test('real public feedback reaches versioned admin review but is not model permi
   await expect(card.getByText('审核版本：0', { exact: true })).toBeVisible();
   await expect(card.getByText('玩家认为应答：', { exact: true })).toBeVisible();
   const reviewed = page.waitForResponse(r => r.url() === `${API}/api/feedback/admin/${publicBody.id}/approve`);
-  await card.getByRole('button', { name: '通过 ✅', exact: true }).click();
+  await card.getByRole('button', { name: '确认反馈有效', exact: true }).click();
   const review = await reviewed; expect(review.ok()).toBeTruthy();
   expect(review.request().postDataJSON()).toEqual({ expectedRowVersion: 0 });
   const actual = (await review.json()).feedback;
@@ -69,13 +69,13 @@ test('another admin review causes real 409 and stale page waits for refreshed se
   const other = await request.post(`${API}/api/feedback/admin/${id}/reject`, { headers: admin, data: { expectedRowVersion: 0 } });
   expect(other.ok()).toBeTruthy();
   const conflict = page.waitForResponse(r => r.url() === `${API}/api/feedback/admin/${id}/approve`);
-  await card.getByRole('button', { name: '通过 ✅', exact: true }).click();
+  await card.getByRole('button', { name: '确认反馈有效', exact: true }).click();
   expect((await conflict).status()).toBe(409);
   await expect(page.getByText('这条反馈已被其他审核更新，请刷新后重新核对', { exact: true })).toBeVisible();
   await expect(card.getByText('审核版本：0', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '刷新', exact: true }).click();
   await expect(card.getByText('审核版本：1', { exact: true })).toBeVisible();
-  await expect(card.getByRole('button', { name: '通过 ✅', exact: true })).toHaveCount(0);
+  await expect(card.getByRole('button', { name: '确认反馈有效', exact: true })).toHaveCount(0);
   await page.screenshot({ path: info.outputPath('feedback-cas-conflict.png'), fullPage: true });
 });
 

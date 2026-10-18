@@ -213,20 +213,16 @@ export default function AdminFeedbackPage() {
   }
 
   return (
-    <main className="mx-auto w-full min-w-0 max-w-3xl px-4 py-8">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <main className="mx-auto w-full min-w-0 max-w-3xl px-4 py-6 sm:py-8">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="font-display text-xl font-bold">反馈管理后台</h1>
-          <p className="muted text-sm">
-            最近7天反馈 · 范围内 {loadedToken === token ? total : 0} 条 · 已加载 {visibleFeedbacks.length} 条
-            {pendingCount > 0 && (
-              <span className="ml-2 text-accent-text">（已加载中 {pendingCount} 条待审核）</span>
-            )}
-          </p>
+          <p className="muted mt-1 text-sm">这里主要用来核对玩家提交的回答问题。</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
           <select
-            className="input w-auto min-w-[8rem] py-2"
+            aria-label="按处理状态筛选"
+            className="input w-full py-2 sm:w-auto sm:min-w-[8rem]"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value as FeedbackStatus | '')}
           >
@@ -237,7 +233,8 @@ export default function AdminFeedbackPage() {
             ))}
           </select>
           <select
-            className="input w-auto min-w-[8rem] py-2"
+            aria-label="按汤题筛选"
+            className="input w-full py-2 sm:w-auto sm:min-w-[8rem]"
             value={soupFilter}
             onChange={(e) => setSoupFilter(e.target.value)}
           >
@@ -248,11 +245,11 @@ export default function AdminFeedbackPage() {
               </option>
             ))}
           </select>
-          <button className="btn btn-ghost" onClick={() => { setLoading(true); setError(''); void load(token); }} disabled={waiting || reviewingId !== null}>
+          <button className="btn btn-ghost w-full sm:w-auto" onClick={() => { setLoading(true); setError(''); void load(token); }} disabled={waiting || reviewingId !== null}>
             {waiting ? '刷新中…' : '刷新'}
           </button>
           <button
-            className="btn btn-ghost"
+            className="btn btn-ghost w-full sm:w-auto"
             onClick={() => {
               localStorage.removeItem(ADMIN_TOKEN_KEY);
               window.dispatchEvent(new Event(ADMIN_TOKEN_EVENT));
@@ -265,7 +262,14 @@ export default function AdminFeedbackPage() {
 
       {error && <p className="mt-3 text-sm text-danger-strong">{error}</p>}
 
-      <MetricsPanel adminToken={token} />
+      <section className="card mt-5 p-4" aria-labelledby="feedback-list-heading">
+        <div className="flex items-center justify-between gap-3">
+          <h2 id="feedback-list-heading" className="font-display text-lg font-bold">待处理反馈</h2>
+          <span className="rounded-full bg-accent/10 px-3 py-1 text-sm font-medium text-accent-text">{pendingCount} 条待处理</span>
+        </div>
+        <p className="muted mt-2 text-sm">依次核对“玩家问、主持人答、玩家认为应答”。确认有效只记录审核结果，不会直接修改线上回答规则。</p>
+        <p className="muted mt-1 text-xs">最近7天共 {loadedToken === token ? total : 0} 条，当前已加载 {visibleFeedbacks.length} 条。</p>
+      </section>
 
       <div className="mt-4 space-y-3">
         {shown.length === 0 && !waiting && (
@@ -330,18 +334,18 @@ export default function AdminFeedbackPage() {
             {(f.status === 'pending' || (feedbackNeedsManualCorrection(f) && f.status !== 'rejected')) && (
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
-                  className="btn btn-solid bg-success text-white hover:bg-success/90"
+                  className="btn btn-solid w-full bg-success text-white hover:bg-success/90 sm:w-auto"
                   onClick={() => review(f.id, 'approve')}
                   disabled={reviewingId !== null || feedbackNeedsManualCorrection(f)}
                 >
-                  通过 ✅
+                  确认反馈有效
                 </button>
                 <button
-                  className="btn btn-ghost border-danger/30 text-danger hover:bg-danger/10"
+                  className="btn btn-ghost w-full border-danger/30 text-danger hover:bg-danger/10 sm:w-auto"
                   onClick={() => review(f.id, 'reject')}
                   disabled={reviewingId !== null}
                 >
-                  拒绝 ❌
+                  不采纳
                 </button>
               </div>
             )}
@@ -350,11 +354,26 @@ export default function AdminFeedbackPage() {
       </div>
       {loadedToken === token && nextCursor && <button className="btn btn-ghost mt-4" disabled={waiting || reviewingId !== null}
         onClick={() => { setLoading(true); setError(''); void load(token, nextCursor); }}>加载更多</button>}
-      <button className="btn btn-ghost mt-4" disabled={loadedToken !== token} aria-expanded={tasksOpen}
-        onClick={() => setTasksOpen(previous => !previous)}>{tasksOpen ? '关闭任务管理' : '打开任务管理'}</button>
+
+      <section className="card mt-6 p-4">
+        <h2 className="font-display text-lg font-bold">高级功能</h2>
+        <p className="muted mt-1 text-sm">平时审核反馈不需要使用。只有准备让 AI 分析并修改回答规则时才打开。</p>
+        <button className="btn btn-ghost mt-3 w-full sm:w-auto" disabled={loadedToken !== token} aria-expanded={tasksOpen}
+          onClick={() => setTasksOpen(previous => !previous)}>{tasksOpen ? '收起 AI 修正规则' : '高级：AI 修正规则'}</button>
+      </section>
       {tasksOpen && loadedToken === token && <AgentReviewPanel token={token} feedbacks={visibleFeedbacks}
         onFeedbackChanged={updated => setFeedbacks(previous => previous.map(item => item.id === updated.id
           && item.rowVersion < updated.rowVersion ? updated : item))} />}
+
+      <details className="card mt-4 overflow-hidden">
+        <summary className="cursor-pointer list-none p-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
+          <span className="block font-semibold">高级：查看运行数据（平时不用）</span>
+          <span className="muted mt-1 block text-sm">排查访问量或导出技术统计时再打开。</span>
+        </summary>
+        <div className="border-t border-border px-4 pb-4">
+          <MetricsPanel adminToken={token} />
+        </div>
+      </details>
     </main>
   );
 }

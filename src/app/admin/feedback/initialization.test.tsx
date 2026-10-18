@@ -44,3 +44,21 @@ test('entered synthetic credential starts one verification request', async () =>
   fireEvent.change(screen.getByPlaceholderText('管理口令'), { target: { value: 'synthetic-admin' } });
   fireEvent.click(screen.getByRole('button', { name: '进入' })); await screen.findByText('还没有玩家提交反馈。'); expect(fetch).toHaveBeenCalledTimes(1);
 });
+
+test('puts everyday feedback review first and keeps technical tools out of the way', async () => {
+  localStorage.setItem('turtle_admin_token', 'synthetic-admin');
+  vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ totalInRange: 1, nextCursor: null, feedbacks: [{
+    id: 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa', ts: '2026-10-09T00:00:00Z', soupId: 'synthetic', soupTitle: '测试汤',
+    question: '玩家的问题？', hostAnswer: '不是', expectedAnswer: '是', reason: null, status: 'pending', reviewedAt: null,
+    mergedAt: null, mergedAnswer: null, rowVersion: 0, safeForModel: false, sourceState: 'unverified', turnId: null,
+  }] })));
+  render(<AdminFeedbackPage />);
+  const heading = await screen.findByRole('heading', { name: '待处理反馈' });
+  expect(screen.getByRole('button', { name: '确认反馈有效' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '不采纳' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '高级：AI 修正规则' })).toBeTruthy();
+  const summary = screen.getByText('高级：查看运行数据（平时不用）');
+  const details = summary.closest('details') as HTMLDetailsElement;
+  expect(details.open).toBe(false);
+  expect(heading.compareDocumentPosition(details) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});

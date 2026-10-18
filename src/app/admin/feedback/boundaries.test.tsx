@@ -65,9 +65,9 @@ test.each([2, 3, 4])('pagination merges a duplicate identity using rowVersion ra
   expect(screen.getByText('审核版本：' + Math.max(3, incomingVersion))).toBeDefined();
 });
 
-test.each([{ action: '通过 ✅', status: 401, message: '管理口令已失效，请重新登录' },
-  { action: '通过 ✅', status: 500, message: '通过失败（500）' },
-  { action: '拒绝 ❌', status: 500, message: '拒绝失败（500）' }])(
+test.each([{ action: '确认反馈有效', status: 401, message: '管理口令已失效，请重新登录' },
+  { action: '确认反馈有效', status: 500, message: '通过失败（500）' },
+  { action: '不采纳', status: 500, message: '拒绝失败（500）' }])(
   'review $action HTTP$status cannot invent the next row version', async ({ action, status, message }) => {
     login(); vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => init?.method === 'POST' ? response({ detail: 'PRIVATE' }, status) : response(page()));
     render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: action }));
@@ -80,9 +80,9 @@ test('a network failure during review preserves the row and permits a fresh expl
   login(); vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
     if (init?.method === 'POST') throw new Error('PRIVATE'); return response(page());
   });
-  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '通过 ✅' }));
+  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '确认反馈有效' }));
   await screen.findByText('网络错误，操作失败');
-  expect((screen.getByRole('button', { name: '通过 ✅' }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole('button', { name: '确认反馈有效' }) as HTMLButtonElement).disabled).toBe(false);
   expect(screen.getByText('审核版本：3')).toBeDefined();
 });
 
@@ -92,7 +92,7 @@ test('a stale review body cannot replace a newer credential view after decoding 
     if (init?.method === 'POST') return Object.assign(response({}), { json: () => new Promise<unknown>(done => { finish = done; }) });
     return response(page([{ ...row(), rowVersion: new Headers(init?.headers).get('X-Admin-Token') === 'new-admin' ? 9 : 3 }]));
   });
-  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '通过 ✅' }));
+  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '确认反馈有效' }));
   await waitFor(() => expect(finish).toBeTypeOf('function'));
   await act(async () => { localStorage.setItem('turtle_admin_token', 'new-admin'); window.dispatchEvent(new StorageEvent('storage')); });
   await screen.findByText('审核版本：9');
@@ -116,12 +116,12 @@ test('confirmed privacy revocation updates only its matching newer parent row an
   vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => init?.method === 'POST'
     ? response({ ok: true, feedback: { ...row(), rowVersion: 4, safeForModel: false } }) : response(page([row(), second])));
   render(<AdminFeedbackPage />); await screen.findByText('合成问题一');
-  fireEvent.click(screen.getByRole('button', { name: '打开任务管理' }));
+  fireEvent.click(screen.getByRole('button', { name: '高级：AI 修正规则' }));
   fireEvent.change(screen.getByLabelText('选择反馈'), { target: { value: id } });
   fireEvent.change(screen.getByLabelText('隐私审核理由'), { target: { value: '合成撤销理由' } });
   fireEvent.click(screen.getByRole('button', { name: '撤销模型许可' })); await screen.findByText('审核版本：4');
   expect(screen.getByText('审核版本：3')).toBeDefined(); expect(screen.getByText('另一条合成问题')).toBeDefined();
-  fireEvent.click(screen.getByRole('button', { name: '关闭任务管理' }));
+  fireEvent.click(screen.getByRole('button', { name: '收起 AI 修正规则' }));
   expect(screen.queryByLabelText('选择反馈')).toBeNull();
 });
 
@@ -133,7 +133,7 @@ test.each(['list', 'review'])('late rejected %s requests cannot restore errors i
     return Promise.resolve(response(page([{ ...row(), question: old ? '合成问题一' : '新口令的反馈', rowVersion: old ? 3 : 9 }])));
   });
   render(<AdminFeedbackPage />);
-  if (mode === 'review') fireEvent.click(await screen.findByRole('button', { name: '通过 ✅' }));
+  if (mode === 'review') fireEvent.click(await screen.findByRole('button', { name: '确认反馈有效' }));
   await waitFor(() => expect(reject).toBeTypeOf('function'));
   await act(async () => { localStorage.setItem('turtle_admin_token', 'new-admin'); window.dispatchEvent(new StorageEvent('storage')); });
   await screen.findByText('新口令的反馈'); await act(async () => reject(new Error('OLD_PRIVATE_ERROR')));
@@ -143,6 +143,6 @@ test.each(['list', 'review'])('late rejected %s requests cannot restore errors i
 test('a malformed review acknowledgement shows a contract error and preserves the current row', async () => {
   login(); vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => init?.method === 'POST'
     ? response({ ok: true, feedback: { ...row(), rowVersion: 5, status: 'approved', reviewedAt: '2026-10-09T00:01:00Z' } }) : response(page()));
-  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '通过 ✅' }));
+  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '确认反馈有效' }));
   await screen.findByText(/反馈数据暂时无法核验/); expect(screen.getByText('审核版本：3')).toBeDefined();
 });

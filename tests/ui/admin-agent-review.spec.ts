@@ -34,12 +34,12 @@ async function linkedFeedback(page: Page) {
   await page.goto('/admin/feedback');
   const card = page.locator('div.card').filter({ hasText: marker });
   await expect(card.getByText('审核版本：0', { exact: true })).toBeVisible();
-  await card.getByRole('button', { name: '通过 ✅', exact: true }).click();
+  await card.getByRole('button', { name: '确认反馈有效', exact: true }).click();
   await expect(card.getByText('审核版本：1', { exact: true })).toBeVisible();
   return { fid, oldSession: old.sessionId as string };
 }
 async function candidateFromBrowser(page: Page, request: APIRequestContext, fid: string) {
-  await page.getByRole('button', { name: '打开任务管理' }).click();
+  await page.getByRole('button', { name: '高级：AI 修正规则' }).click();
   const panel = page.getByRole('region', { name: '任务与候选管理' });
   await panel.getByLabel('选择反馈').selectOption(fid);
   await expect(panel.getByRole('button', { name: '显式启动修复任务' })).toBeDisabled();

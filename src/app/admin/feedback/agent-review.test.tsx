@@ -20,7 +20,7 @@ test('existing admin flow exposes manually edited privacy and separate explicit 
       : { feedbacks: [item], totalInRange: 1, nextCursor: null }), { status: 200 });
   });
   render(<AdminFeedbackPage />); await screen.findByText('他知道吗？');
-  fireEvent.click(screen.getByRole('button', { name: '打开任务管理' }));
+  fireEvent.click(screen.getByRole('button', { name: '高级：AI 修正规则' }));
   fireEvent.change(screen.getByLabelText('选择反馈'), { target: { value: reportId } });
   fireEvent.change(screen.getByLabelText('脱敏后的问题'), { target: { value: '事后他知道吗？' } });
   fireEvent.change(screen.getByLabelText('脱敏后的反馈背景'), { target: { value: '' } });

@@ -17,8 +17,8 @@ test('previously approved invalid historical feedback still offers a safe reject
   vi.stubGlobal('fetch', async (_input: string | URL | Request, init?: RequestInit) => init?.method === 'POST'
     ? response({ ok: true, feedback: { ...old, rowVersion: 4, status: 'rejected', reviewedAt: '2026-10-09T00:02:00Z' } })
     : response(page([old])));
-  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '拒绝 ❌' }));
-  await screen.findByText('审核版本：4'); expect(screen.queryByRole('button', { name: '拒绝 ❌' })).toBeNull();
+  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '不采纳' }));
+  await screen.findByText('审核版本：4'); expect(screen.queryByRole('button', { name: '不采纳' })).toBeNull();
 });
 
 test.each(['soupId', 'question', 'hostAnswer', 'expectedAnswer'])(
@@ -33,8 +33,8 @@ test.each(['soupId', 'question', 'hostAnswer', 'expectedAnswer'])(
     render(<AdminFeedbackPage />); await screen.findByText('正常反馈仍可审核？');
     const card = (await screen.findByText('历史空白反馈', { selector: 'span' })).closest('div.card')!;
     expect(within(card as HTMLElement).getByText(/必填内容仅空白/)).toBeTruthy();
-    expect(within(card as HTMLElement).getByRole('button', { name: '通过 ✅' }).hasAttribute('disabled')).toBe(true);
-    fireEvent.click(within(card as HTMLElement).getByRole('button', { name: '拒绝 ❌' }));
+    expect(within(card as HTMLElement).getByRole('button', { name: '确认反馈有效' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.click(within(card as HTMLElement).getByRole('button', { name: '不采纳' }));
     await within(card as HTMLElement).findByText('审核版本：4');
     expect(JSON.parse(String(rejected?.body))).toEqual({ expectedRowVersion: 3 });
     expect(screen.getByText('正常反馈仍可审核？')).toBeTruthy();
@@ -57,19 +57,19 @@ test('review sends actual rowVersion and shows the verified next server version'
       status: 'approved', reviewedAt: '2026-10-09T00:01:00Z' }) }); }
     return response(page());
   });
-  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '通过 ✅' }));
+  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '确认反馈有效' }));
   await screen.findByText('审核版本：4');
   expect(JSON.parse(String(posted?.body))).toEqual({ expectedRowVersion: 3 });
   expect(new Headers(posted?.headers).get('Content-Type')).toBe('application/json');
-  expect(screen.queryByRole('button', { name: '通过 ✅' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '确认反馈有效' })).toBeNull();
 });
 
 test('stale 409 keeps the current row and asks for refresh instead of local approval', async () => {
   localStorage.setItem('turtle_admin_token', 'synthetic-admin');
   vi.stubGlobal('fetch', async (_input: string | URL | Request, init?: RequestInit) => init?.method === 'POST'
     ? response({ code: 'feedback_version_conflict', detail: '请刷新后重新核对这条反馈' }, 409) : response(page()));
-  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '通过 ✅' }));
-  await screen.findByText(/请刷新/); expect(screen.getByRole('button', { name: '通过 ✅' })).toBeTruthy();
+  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '确认反馈有效' }));
+  await screen.findByText(/请刷新/); expect(screen.getByRole('button', { name: '确认反馈有效' })).toBeTruthy();
   expect(screen.getByText('审核版本：3')).toBeTruthy();
 });
 
@@ -80,11 +80,11 @@ test('late old-credential review cannot replace a newer credential row', async (
     if (init?.method === 'POST') return waiting;
     return response(page([row({ rowVersion: new Headers(init?.headers).get('X-Admin-Token') === 'synthetic-new' ? 9 : 3 })]));
   });
-  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '通过 ✅' }));
+  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '确认反馈有效' }));
   await act(async () => { localStorage.setItem('turtle_admin_token', 'synthetic-new'); window.dispatchEvent(new StorageEvent('storage')); });
   await screen.findByText('审核版本：9');
   await act(async () => { resolve(response({ ok: true, feedback: row({ rowVersion: 4, status: 'approved', reviewedAt: '2026-10-09T00:01:00Z' }) })); });
-  expect(screen.getByText('审核版本：9')).toBeTruthy(); expect(screen.getByRole('button', { name: '通过 ✅' })).toBeTruthy();
+  expect(screen.getByText('审核版本：9')).toBeTruthy(); expect(screen.getByRole('button', { name: '确认反馈有效' })).toBeTruthy();
 });
 
 test('load more uses a bounded server cursor and labels only this time window count', async () => {
@@ -103,7 +103,7 @@ test('load more uses a bounded server cursor and labels only this time window co
 test('a plain ok response does not manufacture review success or browser time', async () => {
   localStorage.setItem('turtle_admin_token', 'synthetic-admin');
   vi.stubGlobal('fetch', async (_input: string | URL | Request, init?: RequestInit) => init?.method === 'POST' ? response({ ok: true }) : response(page()));
-  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '通过 ✅' }));
+  render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '确认反馈有效' }));
   await screen.findByText(/无法核验/); expect(screen.getByText('审核版本：3')).toBeTruthy();
-  expect(screen.getByRole('button', { name: '通过 ✅' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: '确认反馈有效' })).toBeTruthy();
 });

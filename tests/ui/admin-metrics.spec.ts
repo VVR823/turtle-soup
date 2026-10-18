@@ -24,6 +24,7 @@ test('owned real browser: manual stats, source paging, full download and test ex
   page.on('request', request => { if (request.url().startsWith(`${API}/api/metrics/admin`)) statsRequests.push(request.url()); });
   await page.addInitScript(() => localStorage.setItem('turtle_admin_token', 'e2e-test-only'));
   await page.goto('/admin/feedback');
+  await page.getByText('高级：查看运行数据（平时不用）', { exact: true }).click();
   const panel = page.getByRole('region', { name: '运行统计（私有）' });
   await expect(panel.getByRole('button', { name: '查询统计' })).toBeVisible();
   expect(statsRequests).toHaveLength(0); // No statistics polling on mount.
