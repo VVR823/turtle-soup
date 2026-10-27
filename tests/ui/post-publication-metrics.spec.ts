@@ -25,6 +25,7 @@ for (const partial of [false, true]) {
     await page.setViewportSize({ width: 375, height: 812 });
     await page.goto('/admin/feedback');
     await page.getByText('高级：查看运行数据（平时不用）', { exact: true }).click();
+    await page.getByText('高级筛选（通常不用填写）', { exact: true }).click();
     const panel = page.getByRole('region', { name: '运行统计（私有）' });
     await expect(panel.getByRole('button', { name: '查询统计' })).toBeVisible();
     expect(requests).toHaveLength(0);

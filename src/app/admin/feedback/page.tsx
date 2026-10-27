@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { decodeFeedbackPage, decodeFeedbackReview, feedbackNeedsManualCorrection, FeedbackContractError, type Feedback, type FeedbackStatus } from '@/lib/feedback-contract';
 import AgentReviewPanel from '@/components/AgentReviewPanel';
 import MetricsPanel from '@/components/MetricsPanel';
@@ -51,26 +51,42 @@ export default function AdminFeedbackPage() {
   const [loading, setLoading] = useState(true);
   const activeRequest = useRef<AbortController | null>(null);
   const activeReview = useRef<AbortController | null>(null);
+  const loadTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const reviewTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const requestEpoch = useRef(0);
   const [error, setError] = useState('');
   const [soupFilter, setSoupFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<FeedbackStatus | ''>('');
   const [tasksOpen, setTasksOpen] = useState(false);
+  const [dateStart, setDateStart] = useState(''), [dateEnd, setDateEnd] = useState('');
+  const [range, setRange] = useState<{ start: number; end: number; label: string } | null>(null);
 
-  function load(t: string, cursor: string | null = null): Promise<void> {
+  const load = useCallback((t: string, cursor: string | null = null): Promise<void> => {
+    clearTimeout(loadTimer.current); clearTimeout(reviewTimer.current);
     activeRequest.current?.abort();
     activeReview.current?.abort();
     requestEpoch.current++;
     const controller = new AbortController(); activeRequest.current = controller;
     const current = () => activeRequest.current === controller && !controller.signal.aborted && savedAdminToken() === t;
-    const query = cursor === null ? '' : `?cursor=${encodeURIComponent(cursor)}`;
+    // Fence late fetch/body results even when transport ignores abort.
+    const timeout = setTimeout(() => {
+      if (!current()) return;
+      controller.abort(); setLoading(false); setReviewingId(null);
+      setError('反馈加载超时，请点击刷新重试');
+    }, 30000);
+    loadTimer.current = timeout;
+    const params = new URLSearchParams();
+    if (range) { params.set('start', String(range.start)); params.set('end', String(range.end)); }
+    if (cursor !== null) params.set('cursor', cursor);
+    const query = params.size ? `?${params}` : '';
     return fetch(`${API_BASE}/api/feedback/admin${query}`, {
         headers: { 'X-Admin-Token': t },
         signal: controller.signal,
       }).then(async res => {
       if (!current()) return;
       if (res.status === 401) {
-        localStorage.removeItem(ADMIN_TOKEN_KEY);
+        try { localStorage.removeItem(ADMIN_TOKEN_KEY); }
+        catch { setFeedbacks([]); setLoadedToken(''); setError('管理口令失效且无法清除，请允许浏览器存储后重新登录'); return; }
         window.dispatchEvent(new Event(ADMIN_TOKEN_EVENT));
         setError('管理口令错误，请重新输入');
         return;
@@ -95,19 +111,37 @@ export default function AdminFeedbackPage() {
     }).catch(error => {
       if (current()) setError(error instanceof FeedbackContractError ? error.message : '网络错误，请确认后端已启动');
     }).finally(() => {
+      clearTimeout(timeout);
       if (current()) { setLoading(false); setReviewingId(null); }
     });
-  }
+  }, [range]);
 
   useEffect(() => {
     if (token) void load(token);
-    return () => { activeRequest.current?.abort(); activeReview.current?.abort(); };
-  }, [token]);
+    return () => { activeRequest.current?.abort(); activeReview.current?.abort(); clearTimeout(loadTimer.current); clearTimeout(reviewTimer.current); };
+  }, [token, load]);
+
+  function changeRange(next: typeof range) {
+    activeRequest.current?.abort(); activeReview.current?.abort(); requestEpoch.current++;
+    clearTimeout(loadTimer.current); clearTimeout(reviewTimer.current);
+    setFeedbacks([]); setLoadedToken(''); setNextCursor(null); setTotal(0);
+    setSoupFilter(''); setStatusFilter('');
+    setReviewingId(null); setTasksOpen(false); setLoading(true); setError(''); setRange(next);
+  }
+  function queryHistory() {
+    const start = Date.parse(`${dateStart}T00:00:00+08:00`) / 1000;
+    const end = Date.parse(`${dateEnd}T00:00:00+08:00`) / 1000 + 86400;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || end - start > 31 * 86400) {
+      setError('请填写有效的开始和结束日期，每次最多查询31天（含结束当天）'); return;
+    }
+    changeRange({ start, end, label: `${dateStart} 至 ${dateEnd}` });
+  }
 
   function submitToken() {
     const v = inputToken.trim();
     if (!v) return;
-    localStorage.setItem(ADMIN_TOKEN_KEY, v);
+    try { localStorage.setItem(ADMIN_TOKEN_KEY, v); }
+    catch { setError('无法保存管理口令，请允许浏览器存储后重试，或换一个浏览器'); return; }
     setLoading(true); setError('');
     window.dispatchEvent(new Event(ADMIN_TOKEN_EVENT));
   }
@@ -121,6 +155,12 @@ export default function AdminFeedbackPage() {
     const current = () => epoch === requestEpoch.current && activeReview.current === controller
       && !controller.signal.aborted && savedAdminToken() === token;
     setReviewingId(id);
+    const timeout = setTimeout(() => {
+      if (!current()) return;
+      controller.abort(); setReviewingId(null);
+      setError('审核请求超时，可能已经提交；请先刷新核对，再决定是否操作');
+    }, 30000);
+    reviewTimer.current = timeout;
     try {
       const res = await fetch(`${API_BASE}/api/feedback/admin/${id}/${action}`, {
         method: 'POST',
@@ -138,8 +178,9 @@ export default function AdminFeedbackPage() {
       setError('');
       setFeedbacks(previous => previous.map(row => row.id === id && row.rowVersion === item.rowVersion ? updated : row));
     } catch (error) {
-      if (current()) setError(error instanceof FeedbackContractError ? error.message : '网络错误，操作失败');
+      if (current()) setError(error instanceof FeedbackContractError ? error.message : '网络错误，操作结果未确认，可能已经提交；请先刷新核对');
     } finally {
+      clearTimeout(timeout);
       if (current()) setReviewingId(null);
     }
   }
@@ -251,7 +292,8 @@ export default function AdminFeedbackPage() {
           <button
             className="btn btn-ghost w-full sm:w-auto"
             onClick={() => {
-              localStorage.removeItem(ADMIN_TOKEN_KEY);
+              try { localStorage.removeItem(ADMIN_TOKEN_KEY); }
+              catch { setError('无法清除管理口令，请允许浏览器存储后重试；公用设备请关闭页面并清除站点数据'); return; }
               window.dispatchEvent(new Event(ADMIN_TOKEN_EVENT));
             }}
           >
@@ -265,10 +307,25 @@ export default function AdminFeedbackPage() {
       <section className="card mt-5 p-4" aria-labelledby="feedback-list-heading">
         <div className="flex items-center justify-between gap-3">
           <h2 id="feedback-list-heading" className="font-display text-lg font-bold">待处理反馈</h2>
-          <span className="rounded-full bg-accent/10 px-3 py-1 text-sm font-medium text-accent-text">{pendingCount} 条待处理</span>
+          <span className="rounded-full bg-accent/10 px-3 py-1 text-sm font-medium text-accent-text">已加载中 {pendingCount} 条待处理</span>
         </div>
         <p className="muted mt-2 text-sm">依次核对“玩家问、主持人答、玩家认为应答”。确认有效只记录审核结果，不会直接修改线上回答规则。</p>
-        <p className="muted mt-1 text-xs">最近7天共 {loadedToken === token ? total : 0} 条，当前已加载 {visibleFeedbacks.length} 条。</p>
+        <p className="muted mt-1 text-xs">{range?.label ?? '最近7天'}共 {loadedToken === token ? total : 0} 条，当前已加载 {visibleFeedbacks.length} 条。</p>
+        <details className="mt-3">
+          <summary className="cursor-pointer text-sm">查找更早的反馈</summary>
+          <p className="muted mt-2 text-xs">按北京时间查询，包含结束当天；每次最多31天，可以分段查看更早记录。</p>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <label className="text-sm">开始日期<input aria-label="反馈开始日期" type="date" value={dateStart}
+              onChange={event => setDateStart(event.target.value)} className="input mt-1 w-full" /></label>
+            <label className="text-sm">结束日期<input aria-label="反馈结束日期" type="date" value={dateEnd}
+              onChange={event => setDateEnd(event.target.value)} className="input mt-1 w-full" /></label>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button className="btn btn-ghost" disabled={waiting || reviewingId !== null} onClick={queryHistory}>查询历史反馈</button>
+            {range && <button className="btn btn-ghost" disabled={waiting || reviewingId !== null}
+              onClick={() => changeRange(null)}>返回最近7天</button>}
+          </div>
+        </details>
       </section>
 
       <div className="mt-4 space-y-3">

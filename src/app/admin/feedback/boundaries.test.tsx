@@ -81,7 +81,7 @@ test('a network failure during review preserves the row and permits a fresh expl
     if (init?.method === 'POST') throw new Error('PRIVATE'); return response(page());
   });
   render(<AdminFeedbackPage />); fireEvent.click(await screen.findByRole('button', { name: '确认反馈有效' }));
-  await screen.findByText('网络错误，操作失败');
+  await screen.findByText('网络错误，操作结果未确认，可能已经提交；请先刷新核对');
   expect((screen.getByRole('button', { name: '确认反馈有效' }) as HTMLButtonElement).disabled).toBe(false);
   expect(screen.getByText('审核版本：3')).toBeDefined();
 });

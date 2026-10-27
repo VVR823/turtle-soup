@@ -17,6 +17,23 @@ async function openCandidate() {
   fireEvent.click(await screen.findByRole('button', { name: '查看候选' }));
   await screen.findByText('模型建议，不是真人确认。');
 }
+test.each([true, false])('HTTP admin uses secure random bytes or explains unsupported crypto (available=%s)', async available => {
+  const posts: string[] = [];
+  vi.stubGlobal('crypto', available ? { getRandomValues: (bytes: Uint8Array) => { bytes.fill(7); return bytes; } } : {});
+  vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+    if (init?.method === 'POST') { posts.push(String(init.body)); throw new Error('synthetic uncertain response'); }
+    return response(url.includes('rule-candidates') ? candidateDetail() : runPage());
+  });
+  render(<AgentReviewPanel token="synthetic-admin" feedbacks={[]} onFeedbackChanged={() => {}} />);
+  await openCandidate(); fireEvent.change(screen.getByLabelText('候选审核理由'), { target: { value: '事实不充分' } });
+  fireEvent.click(screen.getByRole('button', { name: '拒绝候选' }));
+  if (available) {
+    await screen.findByText(/可能已经提交/); expect(posts).toHaveLength(1);
+    expect(JSON.parse(posts[0]).operationKey).toBe('07070707-0707-4707-8707-070707070707');
+    fireEvent.click(screen.getByRole('button', { name: '重试原操作（相同请求）' }));
+    await waitFor(() => expect(posts).toHaveLength(2)); expect(posts[1]).toBe(posts[0]);
+  } else { expect(screen.getByRole('alert').textContent).toContain('无法生成安全请求编号'); expect(posts).toHaveLength(0); }
+});
 test('original conversation is displayed before human context-independence confirmation', async () => {
   vi.stubGlobal('fetch', async (url: string) => response(url.includes('rule-candidates') ? candidateDetail() : runPage()));
   render(<AgentReviewPanel token="synthetic-admin" feedbacks={[]} onFeedbackChanged={() => {}} />);

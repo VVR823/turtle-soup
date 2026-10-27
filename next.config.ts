@@ -6,6 +6,8 @@ const nextConfig: NextConfig = {
   output: "standalone",
   // 关闭 Next.js 图片优化，避免服务器上再装 sharp
   images: { unoptimized: true },
+  // 发行目录只读；页面缓存留在内存，避免运行时改写已校验的程序包。
+  experimental: { isrFlushToDisk: false },
 };
 
 export default nextConfig;

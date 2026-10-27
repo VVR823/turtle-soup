@@ -6,4 +6,5 @@ uvicorn[standard]==0.52.4
 pydantic>=2,<3
 python-dotenv==1.2.3
 httpx==0.28.1
+certifi>=2026.10.19
 langchain-openai==1.6.0

@@ -61,7 +61,9 @@ async function candidateFromBrowser(page: Page, request: APIRequestContext, fid:
   const run = (await admitted.json()).runId;
   expect(admitted.request().postDataJSON().expectedFeedbackVersion).toBe(2);
   await expect.poll(async () => (await (await request.get(`${API}/api/feedback/admin/agent-runs/${run}`, { headers: admin })).json()).state,
-    { timeout: 10000, intervals: [150, 300, 600] }).toBe('awaiting_review');
+    // Real tool subprocess startup can exceed 10s on Windows. This only
+    // bounds test observation; model/tool limits and business deadlines stay intact.
+    { timeout: 30000, intervals: [250, 500, 1000] }).toBe('awaiting_review');
   const actual = await (await request.get(`${API}/api/feedback/admin/agent-runs/${run}`, { headers: admin })).json();
   expect(actual.modelAttemptsUsed).toBe(3); expect(actual.toolAttemptsUsed).toBe(2);
   await panel.getByRole('button', { name: '刷新任务列表' }).click();
@@ -142,7 +144,8 @@ test('missing current trusted corpus refuses loaded browser approval and shows o
 });
 
 test('genuine browser feedback/privacy/worker/manual approval exact replay/publication/new sessions/rollback retains history', async ({ page, request }, info) => {
-  test.setTimeout(45000);
+  // Includes a cold real worker plus several proof-bound mutations and reads.
+  test.setTimeout(90000);
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
   const { fid, oldSession } = await linkedFeedback(page);
   const { panel, detail, run, cid } = await candidateFromBrowser(page, request, fid);
@@ -160,7 +163,13 @@ test('genuine browser feedback/privacy/worker/manual approval exact replay/publi
   });
   await detail.getByLabel('候选审核理由').fill('Declared synthetic semantic confirmations for UI mechanics only');
   await detail.getByLabel('答案有完整事实支持').check(); await detail.getByLabel('不依赖玩家当前上下文').check();
+  // Observe the deliberately lost reply after the real commit has finished.
+  // Proof verification alone can approach the default 5s assertion timeout.
+  const dropped = page.waitForEvent('requestfailed', {
+    predicate: request => request.url() === `${API}/api/feedback/admin/rule-candidates/${cid}/approve`, timeout: 30000,
+  });
   await detail.getByRole('button', { name: '批准候选（不发布）' }).click();
+  await dropped;
   await expect(panel.getByRole('alert').filter({ hasText: '可能已经提交' })).toBeVisible();
   expect(bodies).toHaveLength(1); expect((await (await request.get(`${API}/api/feedback/admin/rule-candidates/${cid}`, { headers: admin })).json()).candidateStatus).toBe('approved');
   await page.screenshot({ path: info.outputPath('approval-committed-reply-lost.png'), fullPage: true });

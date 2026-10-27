@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { decodeFeedback, feedbackNeedsManualCorrection, type Feedback } from '@/lib/feedback-contract';
+import { newRequestId, GameStorageError } from '@/lib/game-journal';
 import { AgentReviewContractError, decodeAgentRunPage, decodeAgentStatus, decodeAgentStart,
   decodeCandidateDetail, decodeCandidateOperation, decodeRulePublication,
   type AgentRunPage, type AgentStatus, type CandidateDetail, type CandidateIntent } from '@/lib/agent-review-contract';
@@ -57,9 +58,9 @@ function PanelSession({ token, feedbacks, onFeedbackChanged }: Props) {
   function errorMessage(error: unknown) {
     if (error instanceof HttpError && error.status === 401) {
       setBlocked(true); setDetail(null); setRuns(null); setStatus(null); setIntent(null); reset();
-      if (localStorage.getItem('turtle_admin_token') === token) {
+      try { if (localStorage.getItem('turtle_admin_token') === token) {
         localStorage.removeItem('turtle_admin_token'); window.dispatchEvent(new Event('turtle-admin-token-changed'));
-      }
+      } } catch { /* The session is already blocked; do not restore private content. */ }
       return '管理口令已失效，请重新登录';
     }
     if (error instanceof HttpError) {
@@ -70,6 +71,10 @@ function PanelSession({ token, feedbacks, onFeedbackChanged }: Props) {
         : error.message;
     }
     return error instanceof AgentReviewContractError ? error.message : '回复未能确认，可能已经提交；请刷新核对，或重试原操作';
+  }
+  function operationId(): string | null {
+    try { return newRequestId(); }
+    catch (error) { setMessage(error instanceof GameStorageError ? error.message : '无法生成安全请求编号，暂未发送请求'); return null; }
   }
   function navigate() {
     reset(); mutationLock.current = null; setBusy(false); setIntent(null); setRetryAllowed(false);
@@ -142,7 +147,8 @@ function PanelSession({ token, feedbacks, onFeedbackChanged }: Props) {
     if (action !== 'published' && !validNote(note)) return;
     if (action === 'approved' && (!supported || !independent || detail.availability !== 'ready' || detail.candidateStatus !== 'pending')) return;
     if (action === 'published' && (detail.availability !== 'ready' || detail.candidateStatus !== 'approved')) return;
-    const operationKey = crypto.randomUUID(), expected = { candidateId: detail.candidateId, operationKey, action, previousVersion: detail.reviewVersion };
+    const operationKey = operationId(); if (!operationKey) return;
+    const expected = { candidateId: detail.candidateId, operationKey, action, previousVersion: detail.reviewVersion };
     const body = action === 'published' ? { operationKey, expectedReviewVersion: detail.reviewVersion, expectedProofDigest: detail.proofDigest,
       expectedRuleVersion: detail.activeRuleVersion, expectedPointerVersion: detail.activePointerVersion }
       : { operationKey, expectedReviewVersion: detail.reviewVersion, reviewNote: note,
@@ -152,13 +158,15 @@ function PanelSession({ token, feedbacks, onFeedbackChanged }: Props) {
   }
   function startTask(item: Feedback) {
     if (intent || busy || item.status !== 'approved' || !item.safeForModel || item.sourceState !== 'linked' || feedbackNeedsManualCorrection(item)) return;
-    void send({ path: `${ROOT}/agent-runs`, body: JSON.stringify({ feedbackId: item.id, requestId: crypto.randomUUID(), expectedFeedbackVersion: item.rowVersion }),
+    const requestId = operationId(); if (!requestId) return;
+    void send({ path: `${ROOT}/agent-runs`, body: JSON.stringify({ feedbackId: item.id, requestId, expectedFeedbackVersion: item.rowVersion }),
       decode: decodeAgentStart, started: true });
   }
   function rollback(note: string, confirmed: boolean) {
     if (!detail?.material || !confirmed || !validNote(note) || intent || busy
       || detail.material.draft.baseRuleVersion === detail.activeRuleVersion || !Number.isSafeInteger(detail.activePointerVersion + 1)) return;
-    const operationKey = crypto.randomUUID(), targetRuleVersion = detail.material.draft.baseRuleVersion;
+    const operationKey = operationId(); if (!operationKey) return;
+    const targetRuleVersion = detail.material.draft.baseRuleVersion;
     void send({ path: `${ROOT}/rule-releases/rollback`, body: JSON.stringify({ operationKey, targetRuleVersion,
       expectedRuleVersion: detail.activeRuleVersion, expectedPointerVersion: detail.activePointerVersion, reason: note }),
       decode: value => decodeRulePublication(value, { operationKey, targetRuleVersion, previousPointerVersion: detail.activePointerVersion }), candidateId: detail.candidateId });

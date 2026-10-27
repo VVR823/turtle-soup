@@ -42,15 +42,18 @@ def start_and_wait(client, fid):
         json={"feedbackId": fid, "requestId": str(uuid4()), "expectedFeedbackVersion": 2})
     assert start.status_code == 202, start.text
     run = start.json()["runId"]
-    deadline = time.monotonic() + 10
+    # This exercises real subprocess tools. Cold Windows starts take 10-13s;
+    # observe for 30s while retaining the separate 180s business deadline.
+    deadline = time.monotonic() + 30
+    value = None
     while time.monotonic() < deadline:
         response = client.get(f"/api/feedback/admin/agent-runs/{run}", headers=ADMIN)
         assert response.status_code == 200, response.text
         value = response.json()
         if value["state"] not in {"queued", "running"}:
             return value
-        time.sleep(0.03)
-    raise AssertionError("Owned synthetic worker did not terminate within observation window")
+        time.sleep(0.1)
+    raise AssertionError(f"Owned synthetic worker did not terminate within 30s observation window: {value}")
 
 
 def test_owned_ui_prepares_only_source_schema_corpus_not_a_candidate_or_approval(tmp_path):

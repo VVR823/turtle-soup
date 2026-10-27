@@ -151,7 +151,9 @@ function MetricsPanelState({ adminToken }: { adminToken: string }) {
     <h2 id="metrics-heading" className="text-lg font-semibold">运行统计（私有）</h2>
     <p className="mt-2 text-sm">只手动查询，不自动轮询。默认最近7天，最多31天；区间含开始、不含结束，按UTC日期分组。</p>
     <p className="text-sm">只计明确的真实流量；测试、合成、旧数据和来源不明的记录单独列出，不是去重人数或模型正确率。</p>
-    <div className="my-4 grid gap-3 sm:grid-cols-2">
+    <details className="my-4">
+      <summary className="cursor-pointer text-sm font-medium">高级筛选（通常不用填写）</summary>
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
       {(['start', 'end'] as const).map(key => <label key={key} className="text-sm">{key === 'start' ? '开始时间（UTC）' : '结束时间（UTC）'}
         <input aria-label={key === 'start' ? '开始时间（UTC）' : '结束时间（UTC）'} type="datetime-local" step="1" value={fields[key]}
           onChange={event => change(key, event.target.value)} className="mt-1 block w-full rounded border p-2" /></label>)}
@@ -160,7 +162,8 @@ function MetricsPanelState({ adminToken }: { adminToken: string }) {
         <input aria-label={{ soupId: '题目ID', puzzleVersion: '来源题目版本', ruleVersion: '规则版本（业务来源／复查发布目标）' }[key]}
           value={fields[key]} maxLength={key === 'soupId' ? 200 : 67} onChange={event => change(key, event.target.value)} className="mt-1 block w-full rounded border p-2" /></label>)}
       <label className="text-sm">每页分组数<select aria-label="每页分组数" value={fields.limit} onChange={event => change('limit', event.target.value)} className="mt-1 block rounded border p-2"><option>50</option><option>100</option></select></label>
-    </div>
+      </div>
+    </details>
     <div className="flex flex-wrap gap-2">
       <button type="button" disabled={!adminToken || busy} onClick={() => void run('query')} className="rounded bg-slate-800 px-3 py-2 text-white disabled:opacity-50">查询统计</button>
       <button type="button" disabled={!page?.nextCursor || busy} onClick={() => void run('next')} className="rounded border px-3 py-2 disabled:opacity-50">下一页统计</button>

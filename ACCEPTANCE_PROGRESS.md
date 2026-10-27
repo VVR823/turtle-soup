@@ -1,23 +1,34 @@
 ---
-snapshot_status: final-closeout-awaiting-user-actions
+snapshot_status: repairs-deployed-and-verified
 generated_at_utc: 2026-10-15T19:28:54Z
 generated_at_local: 2026-10-16T03:28:54+08:00
-updated_at_utc: 2026-10-18T15:15:00+00:00
-acceptance_execution: completed-manual-closeout
-last_manual_run_finished_at_utc: 2026-10-16T14:08:01.5252530+00:00
-last_manual_verified_at_utc: 2026-10-16T14:09:21.3669176+00:00
+updated_at_utc: 2026-10-25T11:05:07+00:00
+acceptance_execution: manual-deployment-completed
+last_manual_run_finished_at_utc: 2026-10-25T11:05:07+00:00
+last_manual_verified_at_utc: 2026-10-25T11:05:07+00:00
 automatic_continuation: permanently-prohibited-by-user
 automation: deleted
 project: D:/CODE/turtle-soup
 branch: codex/ts02-storage-foundation
-git_head: ace3a9562fd31fab4cf98fb714ac740efaabbadc
-latest_closeout: ACCEPTANCE_CLOSEOUT_2026-10-18.md
-state_captured_at_utc: 2026-10-15T19:18:45.6120645Z
-consistency_checked_at_utc: 2026-10-15T19:20:04.1123791Z
+deployment_base_git_head: c9917a2ebbd541d98ae6b89dc0a93a9438e89f9e
+repository_revision: resolve_with_git_rev_parse_HEAD
+git_worktree_state: code_sync_authorized_personal_notes_local
+historical_snapshot_git_head: ace3a9562fd31fab4cf98fb714ac740efaabbadc
+latest_closeout: docs/deployment-2026-10-25.md
+latest_repository_maintenance: docs/repository-maintenance-2026-10-27.md
+production_release: /opt/turtle-soup/releases/20261025-184511-repairs
+state_captured_at_utc: 2026-10-25T11:05:07Z
+consistency_checked_at_utc: 2026-10-25T11:05:07Z
 timezone: Asia/Shanghai
 ---
 
 # Turtle Soup 完整验收进度快照
+
+## 当前状态：2026-10-25 修复已发布并核验
+
+最新上线结果见 [生产发布记录](docs/deployment-2026-10-25.md) 和 [修复记录](docs/repair-2026-10-25.md)。线上为 `20261025-184511-repairs`；`c9917a2` 是部署时的基础提交，10 月 27 日已获用户授权同步后续修复与简历材料。当前源码提交须用 `git rev-parse HEAD` 核对，不将部署基础提交冒充最新 HEAD。前端 734 项、相关后端 15 项、分批浏览器及框架复验已通过；Next.js 16.4.3、certifi 2026.10.23 已实际部署。正式服务、口令保护和手机浏览器核验通过；发布时题库、规则、14 个对局、30 条消息和 6 条反馈保留，Agent 仍关闭。旧代码漂移和历史脚本已通过新发行包处理，旧 release 与数据库备份保留。仓库同步及临时文件清理见 [维护记录](docs/repository-maintenance-2026-10-27.md)。下方旧通过数和发布路径仅为历史，不代表本轮重新执行的签收。
+
+自动续跑永久禁止；本次经明确授权的手动发布已结束，停止执行，不提交、不推送、不恢复旧自动化。
 
 ## 最终上线收尾：2026-10-18 18:17 +08:00
 
